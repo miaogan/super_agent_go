@@ -293,3 +293,29 @@ milvus:
 # 环境变量：AEGIS_INTERNAL__TOKEN
 internal:
   token: ""
+
+# ===============================================================
+# agent —— 智能体编排与工具执行出站策略
+# ===============================================================
+# ★ 工具 endpoint 的 SSRF 策略（agent_service/internal/toolexec）
+#
+#   tools 表是可写配置：admin 角色能经 POST /api/v1/tools 写入 endpoint，
+#   所以它按不可信输入处理。默认 tool_allow_private_ips=false —— 内网、
+#   链路本地（含 169.254.169.254 云元数据）以及各保留网段一律拒绝。
+#
+#   代价：Docker 桌面版里指向宿主机的 demo 工具（Temp/demo_tools.sql 用的
+#   http://host.docker.internal:3009）会被静默拦截，表现是工具调用报
+#   「endpoint 不合法」。联调时把该主机逐个列进 tool_allow_hosts，
+#   不要为了省事把 tool_allow_private_ips 设成 true。
+#
+#   条目支持 "*.suffix" 形式的域名后缀匹配。
+agent:
+  # 例外主机名单（仅联调环境填写）
+  tool_allow_hosts:
+    - host.docker.internal
+  # 生产必须 false
+  tool_allow_private_ips: false
+  # 单次工具调用总上限；工具自身 timeout_ms 再大也受它约束
+  tool_fetch_timeout: 30s
+  # 响应体上限，防止一个超大响应拖垮进程
+  tool_max_response_bytes: 1048576

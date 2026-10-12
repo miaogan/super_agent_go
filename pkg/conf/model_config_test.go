@@ -102,6 +102,30 @@ func TestLoadExampleConfig(t *testing.T) {
 		t.Errorf("llm.default_model=%q 不在 models 清单中", c.LLM.DefaultModel)
 	}
 
+	// 工具出站策略：yaml key 拼错时不会报错、不会告警，只是静默不生效
+	// （本项目已因此在 configs 上踩过两次），所以逐个断言真的绑上了。
+	if len(c.Agent.ToolAllowHosts) == 0 {
+		t.Error("agent.tool_allow_hosts 未绑定：示例配置应给出联调用主机名单")
+	}
+	bound := false
+	for _, h := range c.Agent.ToolAllowHosts {
+		if h == "host.docker.internal" {
+			bound = true
+		}
+	}
+	if !bound {
+		t.Errorf("agent.tool_allow_hosts 内容不符: %v", c.Agent.ToolAllowHosts)
+	}
+	if c.Agent.ToolAllowPrivateIPs {
+		t.Error("示例配置不应默认放开内网：agent.tool_allow_private_ips 必须为 false")
+	}
+	if c.Agent.ToolFetchTimeout <= 0 {
+		t.Errorf("agent.tool_fetch_timeout 未绑定或非法: %v", c.Agent.ToolFetchTimeout)
+	}
+	if c.Agent.ToolMaxResponseBytes <= 0 {
+		t.Errorf("agent.tool_max_response_bytes 未绑定或非法: %d", c.Agent.ToolMaxResponseBytes)
+	}
+
 	// 维度自洽
 	if c.LLM.DefaultEmbedDim != c.Milvus.Dim {
 		t.Errorf("维度不一致: llm.default_embed_dim=%d, milvus.dim=%d",

@@ -97,23 +97,31 @@ func main() {
 			}
 
 			// 3) 编排器
-				var toolExec toolexec.ToolExecutor
-				if reg, ok := st.(toolexec.ToolRegistry); ok {
-					toolExec = toolexec.NewHTTP(reg, 30*time.Second)
-					logger.Info(ctx, "agent_service: 工具执行器已注入", "registry", fmt.Sprintf("%T", reg))
-				}
-
-				orch := orchestrate.New(orchestrate.Options{
-					LLM:           &orchestrate.LLMAdapter{C: llm},
-					RAG:           &orchestrate.RAGAdapter{C: rag},
-					KBMount:       &orchestrate.RAGAdapter{C: rag},
-					Store:         st,
-					Agent:         c.Agent,
-					RAGCfg:        c.RAG,
-					EnableRAG:     c.Agent.EnableRAG,
-					ToolExec:      toolExec,
-					MaxToolRounds: 5,
+			var toolExec toolexec.ToolExecutor
+			if reg, ok := st.(toolexec.ToolRegistry); ok {
+				toolExec = toolexec.NewHTTP(reg, toolexec.Config{
+					Timeout:          c.Agent.ToolFetchTimeout,
+					MaxResponseBytes: c.Agent.ToolMaxResponseBytes,
+					AllowPrivateIPs:  c.Agent.ToolAllowPrivateIPs,
+					AllowHosts:       c.Agent.ToolAllowHosts,
 				})
+				logger.Info(ctx, "agent_service: 工具执行器已注入",
+					"registry", fmt.Sprintf("%T", reg),
+					"allow_private_ips", c.Agent.ToolAllowPrivateIPs,
+					"allow_hosts", len(c.Agent.ToolAllowHosts))
+			}
+
+			orch := orchestrate.New(orchestrate.Options{
+				LLM:           &orchestrate.LLMAdapter{C: llm},
+				RAG:           &orchestrate.RAGAdapter{C: rag},
+				KBMount:       &orchestrate.RAGAdapter{C: rag},
+				Store:         st,
+				Agent:         c.Agent,
+				RAGCfg:        c.RAG,
+				EnableRAG:     c.Agent.EnableRAG,
+				ToolExec:      toolExec,
+				MaxToolRounds: 5,
+			})
 
 			agentservice.RegisterService(svr, service.New(st, orch, app.FaultInjector()))
 

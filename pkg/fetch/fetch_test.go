@@ -2,6 +2,9 @@ package fetch
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -150,5 +153,115 @@ func TestFetchTooManyRedirects(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "被拦截") {
 		t.Fatalf("本地策略下不应 SSRF 拦截: %v", err)
+	}
+}
+
+// ---- dial 层（第二层）----
+//
+// 这一层历史上是失效的：旧实现写成「DialContext 里 net.ParseIP(host) 判内网」，
+// 而 Transport 传给 DialContext 的是 URL 原始 host（域名场景不是 IP），
+// ParseIP 返回 nil → 整个判断被跳过 → 域名目标从来没有任何 dial 层校验。
+// 下面这组用例直接喂「解析到回环的域名」，在旧实现下会全绿，因此是有效回归防线。
+
+func testDial(p ssrf.Policy) func(context.Context, string, string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 2 * time.Second}
+	resolver := &net.Resolver{PreferGo: true}
+	return dialContextFunc(p, dialer, resolver, 2*time.Second)
+}
+
+// TestDial_domainResolvingToLoopbackBlocked 域名解析到回环时必须在 dial 层被拒。
+func TestDial_domainResolvingToLoopbackBlocked(t *testing.T) {
+	dial := testDial(ssrf.Default) // AllowPrivateIPs=false
+	_, err := dial(context.Background(), "tcp", "localhost:1")
+	if !errors.Is(err, ssrf.ErrBlocked) {
+		t.Fatalf("解析到回环的域名应被 dial 层拦截, 实际 %v", err)
+	}
+}
+
+// TestDial_privateIPLiteralBlocked IP 字面量同样被 dial 层拒绝。
+func TestDial_privateIPLiteralBlocked(t *testing.T) {
+	dial := testDial(ssrf.Default)
+	_, err := dial(context.Background(), "tcp", "10.0.0.1:80")
+	if !errors.Is(err, ssrf.ErrBlocked) {
+		t.Fatalf("内网 IP 字面量应被拦截, 实际 %v", err)
+	}
+}
+
+// TestDial_allowHostsExemptsPrivate 例外名单命中后放行 —— 这是 host.docker.internal
+// 这类联调目标能在生产策略下工作的唯一正确姿势。
+func TestDial_allowHostsExemptsPrivate(t *testing.T) {
+	p := ssrf.Default
+	p.AllowHosts = []string{"localhost"}
+	dial := testDial(p)
+	// 放行后可能因端口无人监听而连接失败，但那不是 SSRF 拦截
+	_, err := dial(context.Background(), "tcp", "localhost:1")
+	if errors.Is(err, ssrf.ErrBlocked) {
+		t.Fatalf("localhost 在例外名单中不应被拦截, 实际 %v", err)
+	}
+}
+
+// TestDial_allowHostsSuffixMatch 后缀通配匹配放行，且不能连带放过近似域名。
+//
+// 未放行的那一半用 `.invalid` 断言（RFC 6761 规定该 TLD 永不解析），
+// 不用本机那些会被通配 DNS 接管的域名 —— 那样断言会随环境漂移。
+func TestDial_allowHostsSuffixMatch(t *testing.T) {
+	p := ssrf.Default
+	p.AllowHosts = []string{"*.svc.internal"}
+	dial := testDial(p)
+
+	_, err := dial(context.Background(), "tcp", "tool-a.svc.internal:1")
+	if errors.Is(err, ssrf.ErrBlocked) {
+		t.Fatalf("后缀匹配应放行, 实际 %v", err)
+	}
+
+	_, err = dial(context.Background(), "tcp", "tool-a.invalid:1")
+	if !errors.Is(err, ssrf.ErrBlocked) {
+		t.Fatalf("不在例外名单内的域名应在解析阶段被拒, 实际 %v", err)
+	}
+}
+
+// TestFetchDoPostSendsBody 工具执行走 Do：POST 带 JSON body 且自动补 Content-Type。
+func TestFetchDoPostSendsBody(t *testing.T) {
+	var gotMethod, gotCT, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotMethod, gotCT, gotBody = r.Method, r.Header.Get("Content-Type"), string(b)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	data, err := Do(context.Background(), "post", srv.URL, []byte(`{"city":"BJ"}`), localOpt(0))
+	if err != nil {
+		t.Fatalf("Do 失败: %v", err)
+	}
+	if string(data) != `{"ok":true}` {
+		t.Errorf("响应不符: %q", data)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("方法应为 POST, 实际 %q", gotMethod)
+	}
+	if !strings.Contains(gotCT, "application/json") {
+		t.Errorf("应自动带上 JSON Content-Type, 实际 %q", gotCT)
+	}
+	if gotBody != `{"city":"BJ"}` {
+		t.Errorf("请求体丢失: %q", gotBody)
+	}
+}
+
+// TestFetchGetDropsBody GET 不应携带请求体（否则上游可能按 POST 语义处理）。
+func TestFetchGetDropsBody(t *testing.T) {
+	var body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		body = string(b)
+		w.Write([]byte("ok"))
+	}))
+	t.Cleanup(srv.Close)
+
+	if _, err := Do(context.Background(), "GET", srv.URL, []byte(`{"x":1}`), localOpt(0)); err != nil {
+		t.Fatalf("Do 失败: %v", err)
+	}
+	if body != "" {
+		t.Errorf("GET 不应带请求体, 实际 %q", body)
 	}
 }

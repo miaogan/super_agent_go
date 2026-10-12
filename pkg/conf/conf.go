@@ -500,6 +500,22 @@ type AgentConf struct {
 
 	// RAG 默认开关
 	EnableRAG bool `yaml:"enable_rag"`
+
+	// 工具执行出站策略
+	//
+	// ★ 为什么默认严格：tools 表不是纯可信基础设施 —— admin 角色可通过
+	//   POST /api/v1/tools 写入 endpoint（gateway/internal/router/router.go:198）。
+	//   若允许内网，一个沦陷的 admin 账号就能让 agent_service 代为访问
+	//   整段内网，包括 169.254.169.254 元数据服务。
+	//   联调需要的 host.docker.internal 请走 ToolAllowHosts 逐个放行，
+	//   不要整体放开。
+	ToolAllowPrivateIPs bool `yaml:"tool_allow_private_ips"`
+	// ToolAllowHosts 例外主机名单（精确或 "*.suffix"）
+	ToolAllowHosts []string `yaml:"tool_allow_hosts"`
+	// ToolFetchTimeout 单次工具调用的总上限，工具自身 timeout_ms 再小也受它约束
+	ToolFetchTimeout time.Duration `yaml:"tool_fetch_timeout"`
+	// ToolMaxResponseBytes 工具响应体上限，防止被一个超大响应拖垮内存
+	ToolMaxResponseBytes int64 `yaml:"tool_max_response_bytes"`
 }
 
 // GatewayConf 网关配置
@@ -854,6 +870,10 @@ func applyEnv(c *Config) {
 	setInt("AEGIS_AGENT__MAX_SESSIONS_PER_USER", &c.Agent.MaxSessionsPerUser)
 	setDur("AEGIS_AGENT__SESSION_TTL", &c.Agent.SessionTTL)
 	setBool("AEGIS_AGENT__ENABLE_RAG", &c.Agent.EnableRAG)
+	setBool("AEGIS_AGENT__TOOL_ALLOW_PRIVATE_IPS", &c.Agent.ToolAllowPrivateIPs)
+	setList("AEGIS_AGENT__TOOL_ALLOW_HOSTS", &c.Agent.ToolAllowHosts)
+	setDur("AEGIS_AGENT__TOOL_FETCH_TIMEOUT", &c.Agent.ToolFetchTimeout)
+	setInt64("AEGIS_AGENT__TOOL_MAX_RESPONSE_BYTES", &c.Agent.ToolMaxResponseBytes)
 
 	// Gateway
 	setStr("AEGIS_GATEWAY__ADDR", &c.Gateway.Addr)
@@ -1015,6 +1035,12 @@ func Default() *Config {
 			MaxSessionsPerUser:    200,
 			SessionTTL:            7 * 24 * time.Hour,
 			EnableRAG:             true,
+			// 工具出站默认严格：不放开内网、例外名单为空。
+			// 联调请在 configs/*.yaml 里显式加 tool_allow_hosts。
+			ToolAllowPrivateIPs:  false,
+			ToolAllowHosts:       nil,
+			ToolFetchTimeout:     30 * time.Second,
+			ToolMaxResponseBytes: 1 << 20, // 1MB
 		},
 		Gateway: GatewayConf{
 			// 8000 是对外统一入口，dev/生产一致：
