@@ -1,0 +1,295 @@
+# Aegis 配置示例
+#
+# ★ 所有配置项都能用环境变量覆盖（AEGIS_ 前缀，双下划线表示层级）：
+#   yaml 里的 rag.default_top_k→  AEGIS_RAG__DEFAULT_TOP_K=5
+#   yaml 里auth.jwt_secret      →  AEGIS_AUTH__JWT_SECRET=xxx
+#
+# 因此容器化时不需要把本文件打进镜像再改，直接传环境变量更安全 ——
+# 配置文件里的密钥不会进镜像层。
+#
+# 完整字段清单见 pkg/conf/conf.go 的结构体定义。
+
+service:
+  name: aegis
+  port: 8000
+
+log:
+  level: info
+  json: true
+
+json:
+  engine: auto        # auto / sonic / std
+  strict: false       # true 时引擎不符预期直接拒绝启动（生产建议开）
+  print_engine: true
+
+# ===============================================================
+# LLM —— 模型服务（平台统一模型出口）
+# ===============================================================
+#
+# ★ 当前接入：阿里云百炼（DashScope）兼容模式
+#   BaseURL: https://maas.qianwenaiapi.com/compatible-mode/v1
+#   协议: OpenAI 兼容（/v1/chat/completions、/v1/embeddings）
+#
+#★ BaseURL 带不带 /v1 都可以 —— rawhttp 的 endpoint() 会自动归一化，
+#   不会拼出 /v1/v1/chat/completions（实测踩过，见 pkg/provider/rawhttp/endpoint_test.go）。
+#
+# ★ 密钥不要提交到仓库！生产环境用环境变量注入：
+#     export AEGIS_LLM__MODELS__0__API_KEY=sk-xxxx
+#   或用 .env（已在 .gitignore 与 .dockerignore 中）。
+llm:
+  # provider: rawhttp（零第三方依赖薄客户端）/ eino（未接入）/ mock
+  provider: rawhttp
+
+  # 默认对话模型（降级链首选）
+  default_model: qwen3.8-max
+
+  # 默认向量模型 —— 必须与 Milvus collection 的向量维度一致
+  default_embed_model: qwen3.7-text-embedding-flash
+  default_embed_dim: 1024      # ★ 实测该模型输出 1024 维，与 schema 一致
+
+  timeout: 120s
+  max_tokens: 8192
+
+  cache_enabled: true
+  embed_cache_ttl: 24h
+
+  # ★ 以下能力标注全部来自 2026-10-09 逐模型实测，不是按模型名推测的。
+  #
+  #   实测方法（可复现）：
+  #     tool_call  → POST /v1/chat/completions 带 tools 字段，看 finish_reason 是否 tool_calls
+  #     reasoning  → 看响应 reasoning_content 是否有内容 / usage.completion_tokens_details.reasoning_tokens
+  #     streaming  → stream:true，数data 行数与 [DONE]
+  #
+  #   ★ 修正过3 处最初按推测填错的地方：
+  #     qwen3.8-27b   reasoning  推测 false → 实测 true（61 字符 / 16 tokens）
+  #     qwen3.7-flash reasoning  推测 false → 实测 true（600 字符 / 194 tokens）
+  #     qwen3.7-flash tool_call  推测 false → 实测仍为 false（带 tools 时 finish_reason=stop，
+  #                                            tool_calls=null —— 不支持，不能开）
+  models:
+    # ---------- 对话模型 ----------
+    # 优先级数字越小越优先；同priority 按列表顺序尝试。
+    #
+    # ★ 降级链设计：qwen3.8-max（最强）→ deepseek-v4-pro-0813（推理备用）
+    #   → qwen3.8-27b（tool_call 备用）→ qwen3.7-flash（轻量兜底）
+    #
+    #   注意 deepseek 与 qwen3.8-27b 均支持 reasoning，
+    #   与 max 的区别在于深度与成本，而非「有无推理能力」。
+
+    - name: qwen3.8-max
+      provider: aliyun-bailian
+      base_url: https://maas.qianwenaiapi.com/compatible-mode/v1
+      api_key: ""                # ★ 由环境变量注入
+      real_model: qwen3.8-max
+      max_tokens: 8192
+      temperature: 0.7
+      priority: 10
+      status: enabled
+      supports_tool_call: true   # 实测：finish_reason=tool_calls，arguments 为标准 JSON string
+      supports_vision: false     # 未验证，按不支持声明（保守）
+      supports_reasoning: true   # 实测：reasoning_content 有内容
+      input_price: 0            # 待按百炼账单补
+      output_price: 0
+
+    - name: deepseek-v4-pro-0813
+      provider: aliyun-bailian
+      base_url: https://maas.qianwenaiapi.com/compatible-mode/v1
+      api_key: ""
+      real_model: deepseek-v4-pro-0813
+      max_tokens: 8192
+      temperature: 0.3      # 推理类模型建议低温
+      priority: 20
+      status: enabled
+      supports_tool_call: true   # 实测：tool_calls 正常返回
+      supports_vision: false
+      supports_reasoning: true   # 实测：reasoning_tokens=102，且 content 可能为空
+                                  # ★ 该模型会先输出 reasoning_content 再给 content，
+                                  #   max_tokens 太小会导致 content 空字符串 —— 详见下方注意事项
+
+    - name: qwen3.8-27b
+      provider: aliyun-bailian
+      base_url: https://maas.qianwenaiapi.com/compatible-mode/v1
+      api_key: ""
+      real_model: qwen3.8-27b
+      max_tokens: 8192
+      temperature: 0.7
+      priority: 30
+      status: enabled
+      supports_tool_call: true
+      supports_vision: false
+      supports_reasoning: true   # ★ 实测为 true（最初按推测填了 false，已修正）
+
+    - name: qwen3.7-flash
+      provider: aliyun-bailian
+      base_url: https://maas.qianwenaiapi.com/compatible-mode/v1
+      api_key: ""
+      real_model: qwen3.7-flash
+      max_tokens: 4096
+      temperature: 0.7
+      priority: 40
+      status: enabled
+      # ★ 实测不支持 tool_call：带 tools 时 finish_reason=stop、tool_calls=null。
+      #   保持 false —— 标成 true 会让上层把工具定义发给它，白花钱且拿不到工具调用。
+      supports_tool_call: false
+      supports_vision: false
+      supports_reasoning: true   # ★ 实测为 true（600 字符 / 194 tokens）
+
+    # ---------- 向量模型 ----------
+    # ★ 实测：POST /v1/embeddings 返回 200，维度 1024，支持批量输入（3 条一次成功）
+    #
+    # ★★★ 稀疏向量（dense+sparse 混合检索）启用说明 ★★★
+    #
+    #   OpenAI 兼容接口（/v1/embeddings）**不返回稀疏向量**（传 output_type=sparse
+    #   会被忽略，仅返回 200）。要拿 sparse_embedding 必须走 DashScope 原生接口：
+    #
+    #     1. 换用支持稀疏的模型（如 text-embedding-v4 / qwen3.7-text-embedding 系列，
+    #        Sparse 为类 SPLADE 训练）；下方示例是 flash 模型（不含 sparse）。
+    #     2. 给该模型加：
+    #          embed_native_path: "text-embedding/text-embedding"   # 服务名，非模型名
+    #          enable_sparse: true
+    #     3. ⚠️ Milvus 集合需含 sparse_vector 字段 —— **schema 变更必须重建集合
+    #        并全量重新向量化**（字段是存量契约）。现有集合直接开启会导致
+    #        Upsert 报 schema 不匹配，须按「部署运维手册 §Milvus 重建」操作。
+    #
+    #   模型配置示例（text-embedding-v4，启用 sparse）：
+    #   - name: text-embedding-v4
+    #     provider: aliyun-bailian
+    #     base_url: https://maas.qianwenaiapi.com/compatible-mode/v1
+    #     api_key: ""
+    #     real_model: text-embedding-v4
+    #     embed_native_path: "text-embedding/text-embedding"
+    #     enable_sparse: true
+    #     priority: 10
+    #     status: enabled
+    #
+    - name: qwen3.7-text-embedding-flash
+      provider: aliyun-bailian
+      base_url: https://maas.qianwenaiapi.com/compatible-mode/v1
+      api_key: ""
+      real_model: qwen3.7-text-embedding-flash
+      priority: 10
+      status: enabled
+
+    # ---------- 重排模型 ----------
+    # ★ 已实测可用（2026-10-09），但端点与 chat/embed 不在同一路径前缀下：
+    #
+    #   chat/embed → {base}/v1/...          base = .../compatible-mode/v1
+    #   rerank     → https://host/api/v1/services/rerank/{服务名}/{服务名}
+    #                ★ 不带 /compatible-mode，走 DashScope 原生路径
+    #
+    #   该平台 compatible-mode 下**没有** OpenAI 风格的 /reranks（实测 8 种路径全 404），
+    #   返回体也是原生格式 output.results[].relevance_score。
+    #
+    # ★★ rerank_path 必须填「服务名」，不是模型名：
+    #
+    #   同一 Key、同一请求体，只改URL 路径段（实测）：
+    #     text-rerank/text-rerank                 → 200
+    #     qwen3.7-text-rerank/text-rerank         → 400 url error
+    #     text-rerank/qwen3.7-text-rerank         → 400 url error
+    #     qwen3.7-text-rerank/qwen3.7-text-rerank → 400 url error
+    #
+    #   路径段用服务名，而请求体的 model 字段用完整模型名，两者不同。
+    #   留空则跳过重排（返回 ErrUnsupported），不会拿模型名硬拼一个必然 400 的 URL。
+    #
+    # 实测相关性分数（query=「什么是RAG」）：
+    #   "RAG是检索增强生成…"→ 0.968
+    #   "机器学习是AI分支"     → 0.286
+    #   "今天天气晴朗"         → 0.003
+    # ★ 注意分数区间 0–1，与向量余弦相似度量纲不同，
+    #   阈值必须单独标定（见 RerankResult.RelevanceScore 注释）。
+    - name: qwen3.7-text-rerank
+      provider: aliyun-bailian
+      base_url: https://maas.qianwenaiapi.com/compatible-mode/v1
+      api_key: ""
+      real_model: qwen3.7-text-rerank
+      rerank_path: text-rerank/text-rerank
+      priority: 10
+      status: enabled
+
+# ===============================================================
+# RAG —— 知识库与检索
+# ===============================================================
+rag:
+  default_chunk_size: 800
+  default_chunk_overlap: 100
+  default_top_k: 5
+  # 生产阈值 0.3 为真实 embedding 标定；
+  # mock 模式另有 mock_score_threshold（见 pkg/conf 字段注释）
+  default_score_threshold: 0.3
+  mock_score_threshold: 0.1
+  context_window: 1
+  ingest_workers: 4
+  enable_rag: true
+  enable_ingest: true
+  keyword_fallback_enabled: true     # ★ 兼容保留：向量库故障时降级为关键词检索
+
+  # ---------- 混合检索（多来源，PRD FR-6.9）----------
+  #
+  # ★ 防单源设计：向量 / 关键词 / 网络 三来源并行召回，
+  #   任一来源故障不影响其他来源产出结果；全部来源失败才整体降级。
+  #
+  # 融合策略：rrf（倒数排名融合，默认）/ vector_only（仅向量，兼容旧行为）
+  merge_strategy: rrf
+  # 关键词检索是否作为常驻来源参与混合（默认 true）
+  enable_keyword_search: true
+  # 网络检索来源总开关（默认 false；开启后需配置下方 web_search）
+  enable_web_search: false
+
+  # 网络检索来源配置
+  web_search:
+    # provider: mock（确定性假结果，无 key 环境/冒烟）或 http（真实搜索 API）
+    provider: mock
+    # http 模式的搜索 API URL，支持 {query} / {top_k} 占位符，如
+    # endpoint: "https://api.example.com/search?q={query}&n={top_k}"
+    endpoint: ""
+    api_key: ""
+    timeout: 5s
+    top_k: 5
+
+  # ---------- 重排（向量召回 → rerank → 取 topK）----------
+  #
+  # ★ 默认开启。它可以安全默认开启的前提是「失败自动降级」：
+  #   未配置重排模型、模型缺 rerank_path、或调用失败时，
+  #   rag_service 会退回按向量相似度排序，并在响应里置 degraded 标记
+  #   —— 用户仍能拿到结果，只是精度打折。
+  rerank_enabled: true
+
+  # 重排模型逻辑名，需在上面的 llm.models 里存在。
+  # 留空则自动选模型名含 "rerank" 的第一个启用模型。
+  rerank_model: ""
+
+  # 送入重排的候选数（向量召回按此数量召回，不是按 default_top_k）。
+  # ★ 必须大于 default_top_k，否则重排只能重新排序、无法替换，
+  #   等于白花一次调用。实测百炼 qwen3.7-text-rerank 单次可处理数十条。
+  rerank_top_k: 20
+
+  # 重排后的相关性阈值，低于则丢弃。
+  # ★ 与 default_score_threshold 量纲不同，不能共用一个值：
+  #   default_score_threshold 是向量余弦相似度；
+  #   rerank_score_threshold 是 rerank 模型自己的分数（0–1）。
+  #   实测 qwen3.7-text-rerank：强相关 0.998 / 勉强 0.42 / 无关 0.24。
+  #
+  # ★ 这与 llm.models 里 rerank 模型的 status 是**两个独立开关**：
+  #   本项管「链路是否发起重排」，status 管「该模型能否被调用」。
+  #   把 status 置 disabled 会让重排走 rerank_unsupported 降级路径。
+  rerank_score_threshold: 0.3
+
+# ===============================================================
+# Milvus —— 向量库
+# ===============================================================
+milvus:
+  address: localhost:19530
+  db_name: aegis
+  collection: doc_chunks
+  # ★ 必须与 llm.default_embed_dim 及模型实际输出维度一致（1024）
+  dim: 1024
+  metric_type: COSINE
+  index_type: HNSW
+
+# ===============================================================
+# internal —— 服务间内部认证（pkg/internalauth）
+# ===============================================================
+# token 非空时，所有 Kitex RPC 经 TTHeader 携带并校验共享令牌；
+# 为空则关闭认证（仅本地 mock 可接受，生产必须配置强随机值）。
+# 环境变量：AEGIS_INTERNAL__TOKEN
+internal:
+  token: ""

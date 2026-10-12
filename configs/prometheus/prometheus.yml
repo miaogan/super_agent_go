@@ -1,0 +1,24 @@
+# Prometheus 抓取配置 —— Aegis 服务矩阵
+#
+# 抓取目标全部走 Compose 内网服务名：
+#   宿主机端口映射绑定了 127.0.0.1，Prometheus 容器无法经宿主回环访问；
+#   而各服务在容器内监听 0.0.0.0，直接用服务名最直接可靠。
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # 内部 RPC 服务：/metrics 挂在健康端口（AEGIS_METRICS__ENABLED）
+  - job_name: aegis-rpc
+    static_configs:
+      - targets:
+          - 'auth_service:8090'
+          - 'user_service:8092'
+          - 'llm_service:8094'
+          - 'rag_service:8095'
+          - 'agent_service:8096'
+
+  # 网关：/metrics 挂在主端口（HTTPOnly 模式无独立健康端口）
+  - job_name: aegis-gateway
+    static_configs:
+      - targets: ['gateway:8000']

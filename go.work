@@ -1,0 +1,18 @@
+// go.work —— 单仓多模块工作区
+//
+// 各服务独立 go.mod（便于分别锁定依赖版本），通过本文件统一编排开发。
+// idl / pkg 作为共享库同处 workspace，Go 会优先解析为本地目录，
+// 因此无需（也不能）在 replace 中重复声明。
+go 1.26.0
+
+use (
+	./agent_service
+	./auth_service
+	./gateway
+	./idl
+	./llm_service
+	./pkg
+	./rag_service
+	./tools/smokeclient
+	./user_service
+)

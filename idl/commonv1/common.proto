@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+// package 命名与本仓库 go module 路径无关，仅用于 protobuf 命名空间隔离。
+package common.v1;
+
+option go_package = "github.com/aegis/idl/kitex_gen/commonv1";
+
+// 通用分页请求
+message PageReq {
+  int32 page      = 1;
+  int32 page_size = 2;
+}
+
+// 通用分页响应元信息
+message PageMeta {
+  int32 total     = 1;
+  int32 page      = 2;
+  int32 page_size = 3;
+  bool  has_more  = 4;
+}
+
+// 通用操作结果
+message OpResult {
+  bool   success = 1;
+  string message = 2;
+}
+
+// 调用方身份上下文 —— 由 gateway 解析 JWT 后透传
+message Identity {
+  int64  uid      = 1;
+  string tenant   = 2;
+  string username = 3;
+  repeated string scopes = 4;
+}
+
+// 降级标记
+message Degradation {
+  bool   degraded = 1;
+  string reason   = 2;
+  string detail   = 3;
+}
+
+// 健康检查
+message HealthReq {}
+
+message HealthResp {
+  bool   healthy    = 1;
+  string service    = 2;
+  string version    = 3;
+  string git_commit = 4;
+  uint64 uptime_sec = 5;
+  bool   mock_mode  = 6;
+}

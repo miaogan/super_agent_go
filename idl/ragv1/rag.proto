@@ -1,0 +1,304 @@
+syntax = "proto3";
+
+package rag.v1;
+
+option go_package = "github.com/aegis/idl/kitex_gen/ragv1";
+
+import "commonv1/common.proto";
+
+// ============================================================
+// rag_service —— 知识库与检索服务
+//
+// 数据分治（见 ADR-006）：
+//   - PostgreSQL：知识库/文档/chunk 正文（内容真相源）、状态机
+//   - Milvus 3.0.2：向量 + 检索必需标量（kb_id/doc_id/chunk_id）
+//
+// 关键设计：
+//   1. Embedding 不直连厂商，统一经 llm_service.Embed()
+//   2. 三级降级：Milvus 不可用 → PG 关键词检索 → 空上下文纯 LLM
+//   3. 一致性靠 vec_status 状态机 + 定时补偿任务
+// ============================================================
+
+service RagService {
+  rpc Health(common.v1.HealthReq) returns (common.v1.HealthResp);
+
+  // ---- 知识库 ----
+  rpc CreateKnowledgeBase(CreateKnowledgeBaseReq) returns (CreateKnowledgeBaseResp);
+  rpc GetKnowledgeBase(GetKnowledgeBaseReq) returns (GetKnowledgeBaseResp);
+  rpc ListKnowledgeBases(ListKnowledgeBasesReq) returns (ListKnowledgeBasesResp);
+  rpc UpdateKnowledgeBase(UpdateKnowledgeBaseReq) returns (UpdateKnowledgeBaseResp);
+  rpc DeleteKnowledgeBase(DeleteKnowledgeBaseReq) returns (common.v1.OpResult);
+
+  // ---- 文档 ----
+  rpc UploadDocument(UploadDocumentReq) returns (UploadDocumentResp);
+  rpc GetDocument(GetDocumentReq) returns (GetDocumentResp);
+  rpc ListDocuments(ListDocumentsReq) returns (ListDocumentsResp);
+  rpc DeleteDocument(DeleteDocumentReq) returns (common.v1.OpResult);
+  // 解析失败或向量化失败后重试
+  rpc RetryDocument(RetryDocumentReq) returns (common.v1.OpResult);
+
+  // ---- 切片 ----
+  rpc ListChunks(ListChunksReq) returns (ListChunksResp);
+
+  // ---- 检索 ----
+  // 生产检索入口（由 agent_service 调用）
+  rpc Retrieve(RetrieveReq) returns (RetrieveResp);
+  // 检索调试（控制台用，返回各阶段明细）
+  rpc DebugRetrieve(DebugRetrieveReq) returns (DebugRetrieveResp);
+
+  // ---- 挂载关系 ----
+  rpc BindAgentKB(BindAgentKBReq) returns (common.v1.OpResult);
+  rpc ListAgentKB(ListAgentKBReq) returns (ListAgentKBResp);
+}
+
+// ---------- 知识库 ----------
+
+message KnowledgeBase {
+  int64  kb_id          = 1;
+  string name           = 2;
+  string description    = 3;
+  string embed_model    = 4;    // 如 bge-m3
+  int32  embedding_dim  = 5;    // ★ 与 Milvus Collection 必须一致（1024）
+  int32  chunk_size     = 6;
+  int32  chunk_overlap  = 7;
+  string splitter       = 8;    // recursive / markdown / semantic
+  int64  owner_uid      = 9;
+  string tenant         = 10;
+  int32  doc_count      = 11;
+  int64  chunk_count    = 12;
+  int64  created_at     = 13;
+  int64  updated_at     = 14;
+}
+
+message CreateKnowledgeBaseReq {
+  string name        = 1;
+  string description = 2;
+  string embed_model = 3;
+  int32  chunk_size  = 4;
+  int32  chunk_overlap = 5;
+  string splitter    = 6;
+  common.v1.Identity identity = 7;
+}
+
+message CreateKnowledgeBaseResp {
+  bool success = 1;
+  int64 kb_id  = 2;
+  string message = 3;
+  KnowledgeBase kb = 4;
+}
+
+message GetKnowledgeBaseReq {
+  int64 kb_id = 1;
+  common.v1.Identity identity = 2;
+}
+
+message GetKnowledgeBaseResp {
+  bool success = 1;
+  KnowledgeBase kb = 2;
+}
+
+message ListKnowledgeBasesReq {
+  common.v1.PageReq page = 1;
+  string keyword = 2;
+  int64  owner_uid = 3;
+  string tenant  = 4;
+}
+
+message ListKnowledgeBasesResp {
+  repeated KnowledgeBase kbs = 1;
+  common.v1.PageMeta meta = 2;
+}
+
+message UpdateKnowledgeBaseReq {
+  int64  kb_id = 1;
+  string name  = 2;
+  string description = 3;
+  int32  chunk_size = 4;
+  int32  chunk_overlap = 5;
+  string splitter = 6;
+  repeated string update_mask = 7;
+  common.v1.Identity identity = 8;
+}
+
+message UpdateKnowledgeBaseResp {
+  bool success = 1;
+  KnowledgeBase kb = 2;
+}
+
+message DeleteKnowledgeBaseReq {
+  int64 kb_id = 1;
+  bool  force = 2;  // 是否级联删除文档与向量
+  common.v1.Identity identity = 3;
+}
+
+// ---------- 文档 ----------
+
+message Document {
+  int64  doc_id     = 1;
+  int64  kb_id      = 2;
+  string file_name  = 3;
+  string file_type  = 4;   // pdf / docx / html / xlsx / md / txt
+  int64  file_size  = 5;
+  string file_hash  = 6;   // 去重
+  int32  status     = 7;   // 1 待解析 / 2 就绪 / 3 失败 / 4 部分成功
+  string error_msg  = 8;
+  int32  chunk_count = 9;
+  int32  parsed_chunks = 10;  // ★ 进度：已向量化切片数
+  int64  created_at = 11;
+  int64  updated_at = 12;
+}
+
+message UploadDocumentReq {
+  int64  kb_id       = 1;
+  string file_name   = 2;
+  string file_type   = 3;
+  bytes  content     = 4;   // 小文件直传；大文件走对象存储后传 URL
+  string file_url    = 5;   // 与 content 二选一
+  string file_hash   = 6;   // 客户端计算，用于秒传与去重
+  int64  file_size   = 7;
+  common.v1.Identity identity = 8;
+}
+
+message UploadDocumentResp {
+  bool   success    = 1;
+  int64  doc_id     = 2;
+  string message    = 3;
+  bool   duplicated = 4;   // 命中 file_hash 去重
+  Document document = 5;
+}
+
+message GetDocumentReq {
+  int64 doc_id = 1;
+  common.v1.Identity identity = 2;
+}
+
+message GetDocumentResp {
+  bool success = 1;
+  Document document = 2;
+}
+
+message ListDocumentsReq {
+  int64  kb_id = 1;
+  common.v1.PageReq page = 2;
+  int32  status = 3;
+  string keyword = 4;
+  common.v1.Identity identity = 5;
+}
+
+message ListDocumentsResp {
+  repeated Document documents = 1;
+  common.v1.PageMeta meta = 2;
+}
+
+message DeleteDocumentReq {
+  int64 doc_id = 1;
+  common.v1.Identity identity = 2;
+}
+
+message RetryDocumentReq {
+  int64 doc_id = 1;
+  bool  re_embed = 2;  // 仅重试向量化，不重新解析
+  common.v1.Identity identity = 3;
+}
+
+// ---------- 切片 ----------
+
+message Chunk {
+  string chunk_id   = 1;
+  int64  kb_id      = 2;
+  int64  doc_id     = 3;
+  int32  seq        = 4;   // 文档内顺序
+  string content    = 5;   // ★ 正文来自 PG（内容真相源）
+  int32  page_no    = 6;
+  int32  token_count = 7;
+  int32  vec_status = 8;   // 0 待写 / 1 已写 / 2 失败
+  double score      = 9;   // 检索时填充
+}
+
+message ListChunksReq {
+  int64  doc_id = 1;
+  common.v1.PageReq page = 2;
+  bool   with_vector_status = 3;
+  common.v1.Identity identity = 4;
+}
+
+message ListChunksResp {
+  repeated Chunk chunks = 1;
+  common.v1.PageMeta meta = 2;
+}
+
+// ---------- 检索 ----------
+
+message RetrieveReq {
+  string query      = 1;
+  repeated int64 kb_ids = 2;
+  int32  top_k      = 3;   // 默认 5
+  double score_threshold = 4;
+  // 上下文外扩：命中 chunk 后额外取其前后 seq，保证语义完整
+  int32  context_window = 5;
+  common.v1.Identity identity = 6;
+  string request_id = 7;
+  // 过滤
+  repeated int64 exclude_doc_ids = 8;
+}
+
+message Hit {
+  string chunk_id   = 1;
+  int64  kb_id      = 2;
+  int64  doc_id     = 3;
+  string doc_title  = 4;
+  int32  page_no    = 5;
+  double score      = 6;
+  string content    = 7;   // 回 PG 取正文
+}
+
+message RetrieveResp {
+  string query         = 1;
+  repeated Hit hits    = 2;
+  int32  total         = 3;
+  bool   degraded      = 4;   // ★ Milvus 不可用，走 PG 关键词降级
+  string degrade_reason = 5;
+  int64  retrieve_ms   = 6;
+  int64  embedding_ms  = 7;
+  int64  search_ms     = 8;
+}
+
+message DebugRetrieveReq {
+  string query = 1;
+  repeated int64 kb_ids = 2;
+  int32  top_k = 3;
+  double score_threshold = 4;
+  bool   with_vector = 5;   // 是否返回向量（仅调试）
+  common.v1.Identity identity = 6;
+}
+
+message DebugRetrieveResp {
+  RetrieveResp result = 1;
+  string embed_model   = 2;
+  int32  dimension     = 3;
+  string milvus_filter = 4;   // 实际下推到 Milvus 的过滤表达式
+  repeated StageTiming stages = 5;
+}
+
+message StageTiming {
+  string stage = 1;   // embedding / milvus_search / pg_fetch / rerank
+  int64  ms    = 2;
+  string detail = 3;
+}
+
+// ---------- 挂载 ----------
+
+message BindAgentKBReq {
+  int64  agent_id = 1;
+  repeated int64 kb_ids = 2;   // 全量覆盖
+  common.v1.Identity identity = 3;
+}
+
+message ListAgentKBReq {
+  int64 agent_id = 1;
+  common.v1.Identity identity = 2;
+}
+
+message ListAgentKBResp {
+  repeated KnowledgeBase kbs = 1;
+}

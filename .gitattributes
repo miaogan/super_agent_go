@@ -1,0 +1,31 @@
+# 默认按内容自动判定，但不改写工作区
+* text=auto
+
+# 必须在 Linux/容器内执行的文本一律保持 LF
+*.sh    text eol=lf
+*.bash  text eol=lf
+*.py    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.go    text eol=lf
+*.mod   text eol=lf
+*.sum   text eol=lf
+*.sql   text eol=lf
+*.proto text eol=lf
+# nginx.conf 等会被直接挂载进容器执行
+*.conf  text eol=lf
+Makefile text eol=lf
+Dockerfile text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+
+# 只归一化行尾，不做二进制猜测
+*.crt text eol=lf
+*.key text eol=lf
+
+# 二进制
+*.png binary
+*.jpg binary
+*.ico binary
+*.pdf binary
+*.gz binary

@@ -1,0 +1,382 @@
+syntax = "proto3";
+
+package agent.v1;
+
+option go_package = "github.com/aegis/idl/kitex_gen/agentv1";
+
+import "commonv1/common.proto";
+
+// ============================================================
+// agent_service —— 智能体编排服务
+//
+// 职责：
+//   1. Agent 的定义与生命周期管理
+//   2. 对话会话（Session）与消息持久化
+//   3. 对话编排：拼装上下文 → 调 llm_service → 工具调用循环
+//   4. 挂载知识库（经 rag_service 检索）构成 RAG 增强对话
+//
+// 依赖：llm_service（模型调用）、rag_service（检索）、user_service（鉴权信息）
+// ============================================================
+
+service AgentService {
+  rpc Health(common.v1.HealthReq) returns (common.v1.HealthResp);
+
+  // ---- Agent 定义管理 ----
+  rpc CreateAgent(CreateAgentReq) returns (CreateAgentResp);
+  rpc GetAgent(GetAgentReq) returns (GetAgentResp);
+  rpc UpdateAgent(UpdateAgentReq) returns (UpdateAgentResp);
+  rpc DeleteAgent(DeleteAgentReq) returns (common.v1.OpResult);
+  rpc ListAgents(ListAgentsReq) returns (ListAgentsResp);
+
+  // ---- 工具管理 ----
+  rpc CreateTool(CreateToolReq) returns (CreateToolResp);
+  rpc GetTool(GetToolReq) returns (GetToolResp);
+  rpc UpdateTool(UpdateToolReq) returns (UpdateToolResp);
+  rpc DeleteTool(DeleteToolReq) returns (common.v1.OpResult);
+  rpc ListTools(ListToolsReq) returns (ListToolsResp);
+
+  // ---- Agent↔Tool 绑定 ----
+  // 绑定真相源在 agent_tools 表（比 Agent.tools 字段多 enabled + config）
+  rpc BindAgentTools(BindAgentToolsReq) returns (common.v1.OpResult);
+  rpc UnbindAgentTools(UnbindAgentToolsReq) returns (common.v1.OpResult);
+  rpc ListAgentTools(ListAgentToolsReq) returns (ListAgentToolsResp);
+
+  // ---- 会话管理 ----
+  rpc CreateSession(CreateSessionReq) returns (CreateSessionResp);
+  rpc GetSession(GetSessionReq) returns (GetSessionResp);
+  rpc ListSessions(ListSessionsReq) returns (ListSessionsResp);
+  rpc DeleteSession(DeleteSessionReq) returns (common.v1.OpResult);
+  rpc ListMessages(ListMessagesReq) returns (ListMessagesResp);
+
+  // ---- 对话（核心）----
+  // 同步：完整回答一次返回
+  rpc Chat(ChatReq) returns (ChatResp);
+  // 流式：SSE 转发到 gateway
+  rpc ChatStream(ChatReq) returns (stream ChatEvent);
+}
+
+// ---------- Agent 定义 ----------
+
+message Agent {
+  int64  agent_id    = 1;
+  string name        = 2;
+  string description = 3;
+  string avatar      = 4;
+  string system_prompt = 5;
+  string model       = 6;   // 默认模型
+  float  temperature = 7;
+  int32  max_tokens  = 8;
+  repeated string tools = 9;
+  repeated int64  kb_ids = 10;  // ★ 挂载的知识库（RAG）
+  bool   rag_enabled = 11;
+  int32  rag_top_k   = 12;
+  double rag_score_threshold = 13;
+  int64  owner_uid   = 14;
+  string tenant      = 15;
+  int32  status      = 16;  // 1 启用 / 2 停用
+  int64  created_at  = 17;
+  int64  updated_at  = 18;
+}
+
+message CreateAgentReq {
+  Agent agent = 1;
+  common.v1.Identity identity = 2;
+}
+
+message CreateAgentResp {
+  bool  success  = 1;
+  int64 agent_id = 2;
+  string message = 3;
+}
+
+message GetAgentReq {
+  int64 agent_id = 1;
+  common.v1.Identity identity = 2;
+}
+
+message GetAgentResp {
+  bool  success = 1;
+  Agent agent   = 2;
+}
+
+message UpdateAgentReq {
+  Agent agent = 1;
+  repeated string update_mask = 2;
+  common.v1.Identity identity = 3;
+}
+
+message UpdateAgentResp {
+  bool  success = 1;
+  Agent agent   = 2;
+}
+
+message DeleteAgentReq {
+  int64 agent_id = 1;
+  common.v1.Identity identity = 2;
+}
+
+message ListAgentsReq {
+  common.v1.PageReq page = 1;
+  string keyword = 2;
+  int64  owner_uid = 3;   // 0=不限（管理员视角）
+  string tenant  = 4;
+  common.v1.Identity identity = 5;
+}
+
+message ListAgentsResp {
+  repeated Agent agents = 1;
+  common.v1.PageMeta meta = 2;
+}
+
+// ---------- 工具 ----------
+//
+// 工具是全局注册的（管理员维护），Agent 通过 tools 名字列表绑定（见 Agent.tools）。
+// 运行时 toolexec 按名字查 tools 表拿到 endpoint / method / timeout 执行 HTTP 调用。
+
+message Tool {
+  int64  tool_id       = 1;
+  string name          = 2;
+  string description   = 3;
+  string type          = 4;   // http（当前支持） / mcp（预留）
+  string endpoint      = 5;
+  string method        = 6;   // POST / GET / PUT / DELETE
+  string params_schema = 7;   // 入参 JSON Schema（JSON 字符串）
+  int32  timeout_ms    = 8;
+  int32  status        = 9;   // 1 启用 / 2 停用
+  int64  created_at    = 10;
+  int64  updated_at    = 11;
+}
+
+message CreateToolReq {
+  Tool tool = 1;
+  common.v1.Identity identity = 2;
+}
+
+message CreateToolResp {
+  bool   success  = 1;
+  int64  tool_id  = 2;
+  string message  = 3;
+}
+
+message GetToolReq {
+  int64 tool_id = 1;
+  common.v1.Identity identity = 2;
+}
+
+message GetToolResp {
+  bool success = 1;
+  Tool tool    = 2;
+}
+
+message UpdateToolReq {
+  Tool tool = 1;
+  repeated string update_mask = 2;  // 空 = 更新全部可改字段
+  common.v1.Identity identity = 3;
+}
+
+message UpdateToolResp {
+  bool success = 1;
+  Tool tool    = 2;
+}
+
+message DeleteToolReq {
+  int64 tool_id = 1;
+  common.v1.Identity identity = 2;
+}
+
+message ListToolsReq {
+  common.v1.PageReq page = 1;
+  string keyword = 2;   // 按 name / description 模糊过滤
+  string type    = 3;   // 按类型过滤（可选）
+  common.v1.Identity identity = 4;
+}
+
+message ListToolsResp {
+  repeated Tool tools = 1;
+  common.v1.PageMeta meta = 2;
+}
+
+// ---------- Agent↔Tool 绑定 ----------
+//
+// Agent.tools（repeated string）是简单工具名列表，
+// agent_tools 表在此基础上增加 enabled 开关和 per-agent config 覆盖。
+// 绑定真相源在 agent_tools 表，Agent.tools 字段可从该表派生。
+
+message AgentToolBinding {
+  int64  agent_id   = 1;
+  string tool_name  = 2;
+  bool   enabled    = 3;
+  string config     = 4;   // JSON 字符串（工具级参数覆盖）
+  int64  created_at = 5;
+}
+
+message BindAgentToolsReq {
+  int64 agent_id = 1;
+  // 全量替换：先清空该 agent 已有绑定，再写入本列表
+  // 空列表 = 清空全部
+  repeated AgentToolBinding bindings = 2;
+  common.v1.Identity identity = 3;
+}
+
+message UnbindAgentToolsReq {
+  int64 agent_id = 1;
+  // 要解绑的工具名；空则解绑全部
+  repeated string tool_names = 2;
+  common.v1.Identity identity = 3;
+}
+
+message ListAgentToolsReq {
+  int64 agent_id = 1;
+  common.v1.Identity identity = 2;
+}
+
+message ListAgentToolsResp {
+  repeated AgentToolBinding bindings = 1;
+}
+
+// ---------- 会话 ----------
+
+message Session {
+  int64  session_id = 1;
+  int64  agent_id   = 2;
+  string title      = 3;
+  int64  uid        = 4;
+  string tenant     = 5;
+  int32  msg_count  = 6;
+  int64  created_at = 7;
+  int64  updated_at = 8;
+}
+
+message CreateSessionReq {
+  int64  agent_id = 1;
+  string title    = 2;  // 留空则用首条消息摘要
+  common.v1.Identity identity = 3;
+}
+
+message CreateSessionResp {
+  bool    success    = 1;
+  int64   session_id = 2;
+  Session session    = 3;
+}
+
+message GetSessionReq {
+  int64 session_id = 1;
+  common.v1.Identity identity = 2;
+}
+
+message GetSessionResp {
+  bool    success = 1;
+  Session session = 2;
+}
+
+message ListSessionsReq {
+  common.v1.PageReq page = 1;
+  int64  uid      = 2;
+  int64  agent_id = 3;   // 0=不限
+  string tenant   = 4;
+  common.v1.Identity identity = 5;
+}
+
+message ListSessionsResp {
+  repeated Session sessions = 1;
+  common.v1.PageMeta meta = 2;
+}
+
+message DeleteSessionReq {
+  int64 session_id = 1;
+  common.v1.Identity identity = 2;
+}
+
+// ---------- 消息 ----------
+
+message ChatMessage {
+  int64  msg_id     = 1;
+  int64  session_id = 2;
+  string role       = 3;   // user / assistant / system / tool
+  string content    = 4;
+  repeated Citation citations = 5;  // ★ RAG 引用来源
+  Usage  usage      = 6;
+  int64  created_at = 7;
+  bool   degraded   = 8;
+  string degrade_reason = 9;
+}
+
+// 引用来源 —— 让用户能溯源到原文
+message Citation {
+  int32  index      = 1;   // 上下文中的编号 [1] [2]
+  int64  kb_id      = 2;
+  int64  doc_id     = 3;
+  string chunk_id   = 4;
+  string doc_title  = 5;
+  int32  page_no    = 6;
+  double score      = 7;
+  string snippet    = 8;   // 摘要片段（回 PG 取正文后截取）
+}
+
+message Usage {
+  int32 prompt_tokens     = 1;
+  int32 completion_tokens = 2;
+  int32 total_tokens      = 3;
+}
+
+message ListMessagesReq {
+  int64  session_id = 1;
+  common.v1.PageReq page = 2;
+  int32  direction  = 3;  // 1=按时间正序 / 2=倒序（默认倒序取最近 N 条）
+  common.v1.Identity identity = 4;
+}
+
+message ListMessagesResp {
+  repeated ChatMessage messages = 1;
+  common.v1.PageMeta meta = 2;
+}
+
+// ---------- 对话（核心）----------
+
+message ChatReq {
+  int64  session_id = 1;   // 0 则自动创建新会话
+  int64  agent_id   = 2;
+  string content    = 3;
+  common.v1.Identity identity = 4;
+  bool   stream     = 5;
+  // 覆盖 Agent 默认配置
+  bool   use_rag    = 6;   // 本次是否启用 RAG
+  repeated int64 kb_ids = 7;
+  string model      = 8;
+  string request_id = 9;
+}
+
+message ChatResp {
+  bool   success    = 1;
+  int64  msg_id     = 2;
+  int64  session_id = 3;
+  ChatMessage message = 4;
+  common.v1.Degradation degradation = 5;
+  // 耗时分解（便于排查 RAG 各阶段）
+  int64  retrieve_ms = 6;
+  int64  llm_ms      = 7;
+  int64  total_ms    = 8;
+}
+
+// 流式事件 —— 统一事件模型，前端按 type 分支处理
+message ChatEvent {
+  string type = 1;  // session / retrieval / delta / reasoning / citation / done / error
+  // type=session
+  int64  session_id = 2;
+  int64  msg_id     = 3;
+  // type=delta / reasoning
+  string delta = 4;
+  // type=citation
+  Citation citation = 5;
+  // type=retrieval（检索阶段完成，可先展示引用来源）
+  int32  hit_count = 6;
+  int64  retrieve_ms = 7;
+  // type=done
+  ChatMessage message = 8;
+  Usage  usage = 9;
+  common.v1.Degradation degradation = 10;
+  // type=error
+  string error_code    = 11;
+  string error_message = 12;
+  int64  llm_ms        = 13;
+}

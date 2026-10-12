@@ -1,0 +1,148 @@
+syntax = "proto3";
+
+package user.v1;
+
+option go_package = "github.com/aegis/idl/kitex_gen/userv1";
+
+import "commonv1/common.proto";
+
+// ============================================================
+// user_service —— 用户与租户管理
+// 职责：用户 CRUD、角色与权限、租户隔离、用户偏好设置
+// ============================================================
+
+service UserService {
+  rpc Health(common.v1.HealthReq) returns (common.v1.HealthResp);
+
+  // ---- 用户 ----
+  rpc GetUser(GetUserReq) returns (GetUserResp);
+  rpc BatchGetUsers(BatchGetUsersReq) returns (BatchGetUsersResp);
+  rpc CreateUser(CreateUserReq) returns (CreateUserResp);
+  rpc UpdateUser(UpdateUserReq) returns (UpdateUserResp);
+  rpc DeleteUser(DeleteUserReq) returns (common.v1.OpResult);
+  rpc ListUsers(ListUsersReq) returns (ListUsersResp);
+
+  // ---- 供 auth_service 调用（认证域所需的最小信息）----
+  rpc GetUserCredential(GetUserCredentialReq) returns (GetUserCredentialResp);
+
+  // ---- 用户偏好（如默认模型、语言）----
+  rpc GetPreference(GetPreferenceReq) returns (GetPreferenceResp);
+  rpc SetPreference(SetPreferenceReq) returns (common.v1.OpResult);
+}
+
+message User {
+  int64  uid        = 1;
+  string username   = 2;
+  string nickname   = 3;
+  string email      = 4;
+  string phone      = 5;
+  string avatar     = 6;
+  int32  status     = 7;   // 1 正常 / 2 禁用 / 3 待激活
+  repeated string roles = 8;
+  string tenant     = 9;
+  int64  created_at = 10;  // Unix 秒
+  int64  updated_at = 11;
+  string source     = 12;  // 账号来源：local / oauth:<idp>
+}
+
+message GetUserReq {
+  int64  uid      = 1;
+  string username = 2;  // 二者取一
+}
+
+message GetUserResp {
+  bool success = 1;
+  User user    = 2;
+}
+
+message BatchGetUsersReq {
+  repeated int64 uids = 1;
+  string tenant       = 2;  // 租户隔离：仅返回同租户用户
+}
+
+message BatchGetUsersResp {
+  repeated User users = 1;
+  repeated int64 missing_uids = 2;  // 未找到的 uid，便于上层区别对待
+}
+
+message CreateUserReq {
+  string username = 1;
+  string password = 2;  // 仅 local 账号需要；OAuth 账号留空
+  string nickname = 3;
+  string email    = 4;
+  string phone    = 5;
+  repeated string roles = 6;
+  string tenant   = 7;
+  string source   = 8;  // local / oauth:<idp>
+}
+
+message CreateUserResp {
+  bool  success = 1;
+  int64 uid     = 2;
+  string message = 3;  // 冲突时说明原因（如用户名已存在）
+}
+
+message UpdateUserReq {
+  int64  uid      = 1;
+  string nickname = 2;
+  string email    = 3;
+  string phone    = 4;
+  string avatar   = 5;
+  repeated string roles = 6;
+  // 字段掩码：仅更新指定字段，避免零值覆盖
+  repeated string update_mask = 15;
+}
+
+message UpdateUserResp {
+  bool success = 1;
+  User user    = 2;
+}
+
+message DeleteUserReq {
+  int64 uid = 1;
+  bool  soft = 2;  // true=软删除（默认），false=物理删除
+}
+
+message ListUsersReq {
+  common.v1.PageReq page = 1;
+  string keyword  = 2;  // 用户名/昵称/邮箱模糊匹配
+  int32  status   = 3;
+  string tenant   = 4;
+}
+
+message ListUsersResp {
+  repeated User users = 1;
+  common.v1.PageMeta meta = 2;
+}
+
+// ---------- 认证域专用 ----------
+
+message GetUserCredentialReq {
+  string username = 1;
+  int64  uid      = 2;
+}
+
+message GetUserCredentialResp {
+  bool   found          = 1;
+  int64  uid            = 2;
+  string username       = 3;
+  string password_hash  = 4;  // bcrypt；仅 auth_service 可获取
+  int32  status         = 5;
+  repeated string roles = 6;
+  string tenant         = 7;
+}
+
+// ---------- 偏好 ----------
+
+message GetPreferenceReq {
+  int64 uid = 1;
+}
+
+message GetPreferenceResp {
+  map<string, string> items = 1;  // 如 {"default_model":"deepseek-chat","lang":"zh-CN"}
+}
+
+message SetPreferenceReq {
+  int64 uid = 1;
+  map<string, string> items = 2;  // 增量合并
+}

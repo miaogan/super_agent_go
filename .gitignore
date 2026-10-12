@@ -1,33 +1,54 @@
-# If you prefer the allow list template instead of the deny list, see community template:
-# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
-#
-# Binaries for programs and plugins
+# ---- 编译产物 ----
+/.run/
+/dist/
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
-
-# Test binary, built with `go test -c`
+# go test -c 产出的二进制
 *.test
 
-# Code coverage profiles and other test artifacts
+# ---- Go ----
+# 编译产物统一落在 .run/bin（见 Makefile 的 BIN_DIR），已被 /.run/ 覆盖。
+# 这里不要再写 /gateway、/auth_service 之类的裸名字：
+# gitignore 无法区分同名文件与目录，那样会把服务源码目录整个忽略掉。
+#
+# 也不要忽略 go.work / go.work.sum：本仓库是刻意的多模块 workspace，
+# 依赖由 go.work 解析，这两个文件必须入库。
+
+# ---- 测试 ----
 *.out
-coverage.*
-!coverage.go
 *.coverprofile
 profile.cov
+coverage.html
+# go tool cover 重定向产生的空 profile
+/coverage
 
-# Dependency directories (remove the comment below to include it)
-# vendor/
+# ---- 前端 ----
+/web/node_modules/
+/web/dist/
+/web/.vite/
 
-# Go workspace file
-go.work
-go.work.sum
-
-# env file
+# ---- 本地配置 ----
+# 配置文件里可能有连接串与密钥，仓库里只保留 *.example.yaml
+/configs/*.local.yaml
+/configs/local.yaml
+*.local.yaml
 .env
+.env.local
 
-# Editor/IDE
-# .idea/
-# .vscode/
+# ---- 证书 ----
+# 私钥不入库；公钥证书随仓库分发。
+# 本地重建自签证书对：
+#   openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+#     -keyout configs/nginx/certs/aegis-dev.key \
+#     -out    configs/nginx/certs/aegis-dev.crt -subj "/CN=aegis.local"
+configs/nginx/certs/*.key
+configs/nginx/certs/*.pem
+
+# ---- 编辑器 ----
+.idea/
+.vscode/
+*.swp
+.DS_Store

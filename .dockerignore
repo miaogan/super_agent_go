@@ -1,0 +1,72 @@
+# ---- Docker 构建上下文排除 ----
+#
+# ★ 为什么必须有这个文件：
+#   Docker 每次构建都会把整个上下文打包发给 daemon。
+#   实测未排除时上下文达 184MB —— 其中 .run/（124MB 本地编译产物）
+#   与 tools/smokeclient 下的二进制占了绝大部分。
+#   这些文件对镜像构建毫无用处，却让每次构建多传 180MB+，
+#   在 CI 上是纯粹的等待与带宽浪费。
+#
+# ★★ 语法陷阱：.dockerignore 不支持行内注释！
+#   写成 `.run/  # 注释` 会被当作「匹配名为 .run/ 与 # 注释 的路径」，
+#   规则完全失效且没有任何报错 —— 表现为"配了 .dockerignore
+#   但构建上下文没变小"，极难定位。
+#   本文件所有注释一律独占一行。
+
+# ---- 编译产物 ----
+#
+# ★ 用 **/smokeclient/*.go 之类的精确路径，或直接列出两个二进制。
+#
+#   踩过的坑：写 `smokeclient` 或 `**/smokeclient` 都会
+#   把 tools/smokeclient/「目录」一起排掉 ——
+#   Docker 的模式匹配不区分「同名文件」与「同名目录」，
+#   于是 Dockerfile 依赖层 COPY tools/smokeclient/go.mod 失败：
+#     failed to calculate checksum ... "/tools/smokeclient/go.mod": not found
+#
+#   正确做法：只排除确切的二进制文件，目录结构保留。
+tools/smokeclient/smokeclient
+/smokeclient
+.run/
+dist/
+*.exe
+aegis
+
+# ---- 构建缓存 ----
+**/.cache/
+**/node_modules/
+**/.terraform/
+
+# ---- 版本控制 ----
+.git/
+.gitignore
+.github/
+
+# ---- 文档 ----
+#
+# 文档不参与构建。若希望镜像内含文档以便排查，可删掉这一段 ——
+# 但注意 COPY . . 会把它带进构建层。
+docs/
+*.md
+
+# ---- 配置与密钥 ----
+#
+# ★ 必须排除 configs/*.local.yaml：可能含真实密钥，
+#   而镜像层可被 docker history 直接看到。
+configs/*.local.yaml
+configs/*.secret.yaml
+.env
+.env.*
+!.env.example
+
+# ---- 编辑器与系统 ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# ---- 运行时与覆盖率 ----
+coverage.html
+coverage.out
+*.out
+*.log
+*.pid

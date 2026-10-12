@@ -1,0 +1,230 @@
+syntax = "proto3";
+
+package llm.v1;
+
+option go_package = "github.com/aegis/idl/kitex_gen/llmv1";
+
+import "commonv1/common.proto";
+
+// ============================================================
+// llm_service —— 大模型统一出口
+//
+// 设计要点（见 ADR-002 / ADR-003）：
+//   1. 全系统唯一的模型调用出口：Chat / ChatStream / Embed 全走这里
+//   2. 内部有 einoProvider 与 rawHTTPProvider 双实现（能力不对等）
+//   3. Token 计量、配额、熔断、降级链在此统一实现
+//   4. rag_service 不持有厂商 Key，Embedding 也经此服务
+// ============================================================
+
+service LLMService {
+  rpc Health(common.v1.HealthReq) returns (common.v1.HealthResp);
+
+  // ---- 对话 ----
+  rpc Chat(ChatReq) returns (ChatResp);
+  // 流式：server streaming，首个 chunk 尽快返回
+  rpc ChatStream(ChatReq) returns (stream ChatChunk);
+
+  // ---- 向量化（供 rag_service 调用）----
+  rpc Embed(EmbedReq) returns (EmbedResp);
+
+  // ---- 重排（供 rag_service 调用）----
+  rpc Rerank(RerankReq) returns (RerankResp);
+
+  // ---- 能力与元信息 ----
+  rpc ListModels(ListModelsReq) returns (ListModelsResp);
+  rpc GetCapabilities(GetCapabilitiesReq) returns (GetCapabilitiesResp);
+
+  // ---- 计量（供后台与运营查询）----
+  rpc GetUsage(GetUsageReq) returns (GetUsageResp);
+}
+
+// ---------- 对话 ----------
+
+message Message {
+  string role         = 1;  // system / user / assistant / tool
+  string content      = 2;
+  string name         = 3;  // tool message 的工具名
+  repeated ToolCall tool_calls = 4;
+  string tool_call_id = 5;  // tool message: 关联 assistant.tool_calls[].id
+}
+
+message ToolCall {
+  string id        = 1;
+  string name      = 2;
+  string arguments = 3;  // JSON 字符串
+}
+
+message ChatReq {
+  string model            = 1;  // 逻辑模型名；留空则用默认
+  repeated Message messages = 2;
+  common.v1.Identity identity = 3;  // 用于配额与计量归属
+  float  temperature      = 4;
+  int32  max_tokens       = 5;
+  bool   stream           = 6;
+  repeated string tools   = 7;   // 工具名列表（由 agent_service 提供定义）
+  // 请求级选项
+  string request_id       = 8;   // 幂等与追踪
+  bool   enable_reasoning = 9;   // 是否要求推理链（并非所有模型支持）
+}
+
+message ChatResp {
+  string content          = 1;
+  string reasoning        = 2;   // 思维链（若有）
+  repeated ToolCall tool_calls = 3;
+  string model            = 4;   // 实际使用的模型
+  Usage usage             = 5;
+  string finish_reason    = 6;   // stop / length / tool_calls
+  common.v1.Degradation degradation = 7;  // 是否走了降级链
+  string provider         = 8;   // eino / rawhttp
+}
+
+message ChatChunk {
+  string delta        = 1;  // 增量文本
+  string reasoning_delta = 2;
+  ToolCall tool_call_delta = 3;
+  bool   done         = 4;  // 末帧标记
+  Usage  usage        = 5;  // 末帧携带
+  common.v1.Degradation degradation = 6;
+}
+
+message Usage {
+  int32 prompt_tokens     = 1;
+  int32 completion_tokens = 2;
+  int32 total_tokens      = 3;
+  int32 cached_tokens     = 4;
+}
+
+// ---------- 向量化 ----------
+
+message EmbedReq {
+  repeated string texts = 1;
+  string model          = 2;   // 留空用默认（bge-m3）
+  common.v1.Identity identity = 3;
+  string input_type     = 4;   // query / document，部分模型需区分
+  // ★ 是否同时生成稀疏向量（词项权重）。bge-m3 等模型原生支持，
+  //   用于 Milvus dense+sparse 混合检索。false 时 sparse_embeddings 为空。
+  bool   enable_sparse = 5;
+}
+
+message EmbedResp {
+  repeated Embedding embeddings = 1;
+  string model      = 2;
+  int32  dimension  = 3;   // ★ 供 rag_service 校验 Collection 维度一致性
+  Usage  usage      = 4;
+  repeated bool cached = 5;  // 每个输入是否命中缓存
+  // ★ 稀疏向量（与 embeddings 一一对应，按 index 对齐）。
+  //   仅当 EmbedReq.enable_sparse=true 且模型支持时非空。
+  repeated SparseEmbedding sparse_embeddings = 6;
+}
+
+message Embedding {
+  repeated float vector = 1;
+  int32 index = 2;
+}
+
+// 稀疏向量的一维：{词典位置 → 权重}。
+// 对应 DashScope 原生接口返回的 sparse_embedding（index/value 对）。
+message SparseEmbedding {
+  repeated SparseToken tokens = 1;
+  int32 index = 2;           // 对应输入 texts 的下标
+}
+
+message SparseToken {
+  int64 index = 1;           // 词项在词表中的位置
+  float value = 2;           // 权重
+}
+
+// ---------- 重排 ----------
+//
+// 检索链路：向量召回 topK → Rerank 重排 → 取 topN → 拼 Prompt。
+// 与 Embed 同属「供 rag_service 调用的检索类出口」，
+// 但计费与端点都独立（部分厂商按次计费），故不并入 Embed。
+
+message RerankReq {
+  string query = 1;
+  repeated string documents = 2;       // ★ 候选（向量召回 topK，按相似度降序）
+  string model  = 3;                   // 留空用默认重排模型
+  int32  top_n  = 4;                   // 返回前 N 条；<=0 表示全部
+  common.v1.Identity identity = 5;     // 与 EmbedReq 一致，用于计量归属
+  bool   return_documents = 6;         // ★ 是否回带原文，见下方说明
+}
+
+message RerankResult {
+  int32  index = 1;         // ★ 在请求 documents 中的下标，不是重排名次
+  double relevance_score = 2;
+  // 原文。仅 request.return_documents=true 时填充。
+  // rag_service 不需要打开：它手里已有 chunk 内容，回传是重复搬运 + 双份内存。
+  string document = 3;
+}
+
+message RerankResp {
+  repeated RerankResult results = 1;   // 按 relevance_score 降序
+  string model = 2;
+  Usage usage = 3;
+  common.v1.Degradation degradation = 4;
+}
+
+// ---------- 元信息 ----------
+
+message ModelInfo {
+  string name        = 1;   // 逻辑名
+  string provider    = 2;   // 厂商
+  string base_url    = 3;
+  int32  max_tokens  = 4;
+  bool   supports_tool_call = 5;
+  bool   supports_vision    = 6;
+  bool   supports_reasoning = 7;
+  string status      = 8;   // enabled / disabled / degraded
+  int32  priority    = 9;   // 降级链优先级，越小越优先
+  double input_price  = 10;  // 每千 token 单价（用于成本核算）
+  double output_price = 11;
+}
+
+message ListModelsReq {
+  bool only_enabled = 1;
+}
+
+message ListModelsResp {
+  repeated ModelInfo models = 1;
+  string default_model = 2;
+}
+
+message GetCapabilitiesReq {}
+
+message GetCapabilitiesResp {
+  bool tool_call   = 1;
+  bool reasoning   = 2;
+  bool multimodal  = 3;
+  bool embeddings  = 4;
+  string provider  = 5;   // 当前生效实现：eino / rawhttp
+  bool   is_mock   = 6;   // ★ mock 模式下为 true
+}
+
+// ---------- 计量 ----------
+
+message GetUsageReq {
+  int64  uid       = 1;
+  string tenant    = 2;
+  int64  start_ts  = 3;
+  int64  end_ts    = 4;
+  string model     = 5;
+  common.v1.PageReq page = 6;
+}
+
+message UsageRecord {
+  string request_id       = 1;
+  int64  uid              = 2;
+  string model            = 3;
+  int32  prompt_tokens    = 4;
+  int32  completion_tokens = 5;
+  double cost             = 6;
+  int64  created_at       = 7;
+  bool   degraded         = 8;
+}
+
+message GetUsageResp {
+  repeated UsageRecord records = 1;
+  common.v1.PageMeta meta = 2;
+  int64 total_tokens = 3;
+  double total_cost  = 4;
+}

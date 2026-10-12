@@ -1,0 +1,140 @@
+syntax = "proto3";
+
+package auth.v1;
+
+option go_package = "github.com/aegis/idl/kitex_gen/authv1";
+
+import "commonv1/common.proto";
+
+// ============================================================
+// auth_service —— 认证授权服务
+//
+// 认证策略（双通道）：
+//   1. 本地账号密码登录（自签 JWT，RS256）
+//   2. OAuth2.0 授权码模式（Authorization Code + PKCE）对接外部 IdP
+//
+// 两条通道最终都签发本系统 JWT，下游服务仅校验 JWT，不关心来源。
+// ============================================================
+
+service AuthService {
+  // ---- 健康检查 ----
+  rpc Health(common.v1.HealthReq) returns (common.v1.HealthResp);
+
+  // ---- 本地账号密码 ----
+  rpc Login(LoginReq) returns (LoginResp);
+  rpc RefreshToken(RefreshTokenReq) returns (LoginResp);
+  rpc Logout(LogoutReq) returns (common.v1.OpResult);
+
+  // ---- OAuth2.0 授权码模式 ----
+  // 第 1 步：生成授权跳转地址（含 state / PKCE code_challenge）
+  rpc OAuthAuthorize(OAuthAuthorizeReq) returns (OAuthAuthorizeResp);
+  // 第 2 步：用回调 code 换取令牌（服务端换 token，再自签本系统 JWT）
+  rpc OAuthCallback(OAuthCallbackReq) returns (LoginResp);
+  // 列出当前启用的 IdP（前端据此渲染多个 SSO 登录入口）
+  rpc ListIdPs(ListIdPsReq) returns (ListIdPsResp);
+
+  // ---- 令牌校验（供 gateway 与内部服务调用）----
+  rpc VerifyToken(VerifyTokenReq) returns (VerifyTokenResp);
+
+  // ---- 授权（RBAC）----
+  rpc CheckPermission(CheckPermissionReq) returns (CheckPermissionResp);
+}
+
+// ---------- 本地登录 ----------
+
+message LoginReq {
+  string username = 1;
+  string password = 2;  // 传输层加密，服务端 bcrypt 校验
+  string captcha  = 3;  // 验证码（连续失败后要求）
+}
+
+message LoginResp {
+  string access_token   = 1;  // 短期令牌（默认 2h）
+  string refresh_token  = 2;  // 长期令牌（默认 7d）
+  int64  expires_at     = 3;  // access_token 过期时间戳（秒）
+  string token_type     = 4;  // 固定 "Bearer"
+  UserInfo user         = 5;
+}
+
+message UserInfo {
+  int64  uid      = 1;
+  string username = 2;
+  string nickname = 3;
+  string email    = 4;
+  string avatar   = 5;
+  repeated string roles = 6;
+  string tenant   = 7;
+}
+
+message RefreshTokenReq {
+  string refresh_token = 1;
+}
+
+message LogoutReq {
+  string access_token = 1;
+  int64  uid          = 2;
+}
+
+// ---------- OAuth2.0 ----------
+
+message OAuthAuthorizeReq {
+  string idp        = 1;  // IdP 标识，如 "keycloak" / "authing" / "wecom"
+  string redirect_uri = 2;  // 回调地址（须在 IdP 白名单内）
+  string state      = 3;  // 由调用方生成的随机串，防 CSRF
+}
+
+message OAuthAuthorizeResp {
+  string authorize_url = 1;  // 302 跳转目标
+  string state         = 2;  // 回显
+  string code_verifier = 3;  // PKCE verifier（前端本地存，回调时带回）
+}
+
+message OAuthCallbackReq {
+  string idp         = 1;
+  string code        = 2;  // IdP 返回的授权码
+  string state       = 3;
+  string code_verifier = 4;  // PKCE
+}
+
+message IdPInfo {
+  string name         = 1;  // 展示名，如 "企业 SSO"
+  string provider     = 2;  // 协议实现，如 "oidc"
+  string authorize_url = 3;
+  bool   enabled      = 4;
+}
+
+message ListIdPsReq {}
+
+message ListIdPsResp {
+  repeated IdPInfo idps = 1;
+}
+
+// ---------- 令牌校验 ----------
+
+message VerifyTokenReq {
+  string access_token = 1;
+  string required_scope = 2;  // 可选：要求具备的 scope
+}
+
+message VerifyTokenResp {
+  bool   valid      = 1;
+  int64  uid        = 2;
+  string username   = 3;
+  string tenant     = 4;
+  repeated string scopes = 5;
+  int64  expires_at = 6;
+  string reason     = 7;  // 无效原因（valid=false 时）
+}
+
+// ---------- 授权 ----------
+
+message CheckPermissionReq {
+  int64  uid      = 1;
+  string resource = 2;  // 如 "kb:1001"
+  string action   = 3;  // 如 "read" / "write"
+}
+
+message CheckPermissionResp {
+  bool   allowed = 1;
+  string reason  = 2;
+}
