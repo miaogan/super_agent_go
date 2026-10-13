@@ -116,7 +116,8 @@ func newFixture(t *testing.T) *pipelineFixture {
 	}
 
 	return &pipelineFixture{
-		pipe:  New(ms, vec, llm, cfg),
+		// nil PDF 引擎 = 走 pkg/parser 的本地实现
+		pipe:  New(ms, vec, llm, cfg, nil),
 		ms:    ms,
 		vec:   vec,
 		llm:   llm,

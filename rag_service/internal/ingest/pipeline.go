@@ -42,6 +42,10 @@ type Pipeline struct {
 	llm    llmservice.Client
 	cfg    conf.RAGConf
 
+	// pdf PDF 正文提取引擎（本地解析或远程 MinerU）。
+	// 为 nil 时 parser 回落本地实现。
+	pdf parser.PDFEngine
+
 	// compensateGate 容量为 1 的 channel，用作补偿任务的非阻塞互斥闸门。
 	//
 	// 为什么不用 sync.Mutex / singleflight：
@@ -55,13 +59,18 @@ type Pipeline struct {
 	compensateGate chan struct{}
 }
 
-// New 构造流水线
-func New(m meta.Store, v vectordb.Store, llm llmservice.Client, cfg conf.RAGConf) *Pipeline {
+// New 构造流水线。
+//
+// pdf 由调用方按配置装配（见 cmd/main.go）：把误配置暴露在启动阶段
+// 报错退出，而不是在流水线里静默回落到本地解析器 —— 后者会让人以为
+// 在用 MinerU，实际入库的是扫描件抽不出内容的垃圾文本。
+func New(m meta.Store, v vectordb.Store, llm llmservice.Client, cfg conf.RAGConf, pdf parser.PDFEngine) *Pipeline {
 	return &Pipeline{
 		meta:           m,
 		vector:         v,
 		llm:            llm,
 		cfg:            cfg,
+		pdf:            pdf,
 		compensateGate: make(chan struct{}, 1),
 	}
 }
@@ -82,7 +91,7 @@ func (p *Pipeline) Ingest(ctx context.Context, kb *ragv1.KnowledgeBase, rec *met
 	// 1) 解析正文
 	//    生产环境此处按 file_type 分派：pdf → pdf 解析器，docx → ……
 	//    mock/文本类型直接按 UTF-8 读取。
-	text, err := parseContent(rec)
+	text, err := p.parseContent(ctx, rec)
 	if err != nil {
 		if err := p.meta.UpdateDocStatus(ctx, docID, meta.DocFailed, err.Error()); err != nil {
 			logger.Warn(ctx, "UpdateDocStatus 失败（入库已继续，补偿任务兜底）", "doc_id", docID, "status", meta.DocFailed, "err", err)
@@ -366,9 +375,9 @@ func (p *Pipeline) collectionOf(kbID int64) string {
 //
 // 统一委托给 pkg/parser：它按文件类型分发到 PDF/DOCX/XLSX/纯文本
 // 各自的解析器，解析失败返回明确 error（不会静默降级为空内容）。
-// 扩展新格式只需往 parser.Parse 加 case，此处无需改动。
-func parseContent(rec *meta.DocumentRecord) (string, error) {
-	return parser.Parse(rec.Doc.GetFileType(), rec.RawBytes)
+// 扩展新格式只需往 parser.ParseWith 加 case，此处无需改动。
+func (p *Pipeline) parseContent(ctx context.Context, rec *meta.DocumentRecord) (string, error) {
+	return parser.ParseFile(ctx, rec.Doc.GetFileType(), rec.Doc.GetFileName(), rec.RawBytes, p.pdf)
 }
 
 // split 递归字符切分。

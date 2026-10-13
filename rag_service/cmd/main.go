@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	llmservice "github.com/aegis/idl/kitex_gen/llmv1/llmservice"
@@ -22,6 +23,7 @@ import (
 	"github.com/aegis/pkg/logger"
 	"github.com/aegis/pkg/metrics"
 	"github.com/aegis/pkg/minio"
+	"github.com/aegis/pkg/parser"
 	"github.com/aegis/pkg/serverx"
 	"github.com/aegis/pkg/tracing"
 	"github.com/aegis/pkg/vectordb"
@@ -41,6 +43,41 @@ import (
 //   - provider=mock：确定性假结果（无 key 环境 / 冒烟测试）
 //   - provider=http：调用真实搜索 API（Endpoint 必填，复用 pkg/fetch 防 SSRF）
 //   - 未启用或未配置：返回 nil（检索引擎自动跳过该来源）
+//
+// buildPDFEngine 按配置装配 PDF 正文提取引擎。
+//
+// 返回 nil 表示用 pkg/parser 的本地实现。
+//
+// ★ pdf_parser=mineru 但 base_url 缺失时在此报错退出：
+//
+//	让服务带着"以为在用 MinerU、实则无 OCR"的状态启动，
+//	代价是大量文档静默抽出空正文，比启动失败难排查一个量级。
+func buildPDFEngine(ctx context.Context, cfg conf.RAGConf) (parser.PDFEngine, error) {
+	switch strings.ToLower(strings.TrimSpace(cfg.PDFParser)) {
+	case "", "local":
+		logger.Info(ctx, "rag_service: PDF 解析走本地实现（无 OCR，扫描件会解析失败）")
+		return nil, nil
+	case "mineru":
+		if strings.TrimSpace(cfg.MinerU.BaseURL) == "" {
+			return nil, fmt.Errorf("rag.pdf_parser=mineru 但 rag.mineru.base_url 未配置")
+		}
+		eng, err := parser.NewMinerU(parser.MinerUConfig{
+			BaseURL:          cfg.MinerU.BaseURL,
+			Timeout:          cfg.MinerU.Timeout,
+			MaxResponseBytes: int64(cfg.MinerU.MaxResponseMB) << 20,
+			AuthToken:        cfg.MinerU.AuthToken,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("构造 MinerU 客户端失败: %w", err)
+		}
+		logger.Info(ctx, "rag_service: PDF 解析走 MinerU",
+			"endpoint", cfg.MinerU.BaseURL, "timeout", cfg.MinerU.Timeout)
+		return eng, nil
+	default:
+		return nil, fmt.Errorf("rag.pdf_parser 取值非法: %q（支持 local / mineru）", cfg.PDFParser)
+	}
+}
+
 func buildWebSearch(cfg conf.RAGConf) (websearch.Provider, error) {
 	if !cfg.EnableWebSearch || cfg.WebSearch.Provider == "" {
 		return nil, nil
@@ -155,7 +192,11 @@ func main() {
 			}
 
 			// 4) 入库流水线与检索引擎
-			pipeline := ingest.New(metaStore, vectorStore, llm, c.RAG)
+			pdfEngine, err := buildPDFEngine(ctx, c.RAG)
+			if err != nil {
+				return nil, err
+			}
+			pipeline := ingest.New(metaStore, vectorStore, llm, c.RAG, pdfEngine)
 			webProvider, err := buildWebSearch(c.RAG)
 			if err != nil {
 				return nil, fmt.Errorf("构造网络检索来源失败: %w", err)

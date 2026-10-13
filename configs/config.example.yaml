@@ -212,6 +212,39 @@ rag:
   default_chunk_size: 800
   default_chunk_overlap: 100
   default_top_k: 5
+
+  # ---- 上传格式白名单 ----
+  # 必须与 pkg/parser 实际支持的格式一致：放进不支持的类型，
+  # 文件能上传但必然解析失败，用户只看到一句"解析失败"。
+  # 图片需要 OCR（走 MinerU），doc/xls/ppt 是 OLE 复合文档，均不支持。
+  allowed_types:
+    - pdf
+    - docx
+    - pptx
+    - xlsx
+    - html
+    - htm
+    - csv
+    - md
+    - markdown
+    - txt
+    - json
+
+  # ---- PDF 解析引擎 ----
+  #   local  —— 内置纯 Go 文本抽取，无 OCR：扫描件/图片型 PDF 会解析失败
+  #   mineru —— 调用 MinerU 服务（OCR + 版面还原，返回 Markdown）
+  #
+  # 取 mineru 时 base_url 必填，否则 rag_service 启动即报错。
+  # 不做"静默回退本地"：那会让人以为在用 OCR，实际入库的是空白文本。
+  # MinerU 通常部署在内网 —— 客户端会把 base_url 的主机自动加入 SSRF
+  # 例外名单（逐个放行），而不是把 allow_private_ips 打开。
+  pdf_parser: local
+  mineru:
+    base_url: ""          # 例：http://mineru.internal:8000
+    timeout: 120s         # 版面分析很慢，别按普通 HTTP 接口的直觉设短
+    max_response_mb: 32
+    auth_token: ""        # 非空时以 Authorization: Bearer 发送
+
   # 生产阈值 0.3 为真实 embedding 标定；
   # mock 模式另有 mock_score_threshold（见 pkg/conf 字段注释）
   default_score_threshold: 0.3

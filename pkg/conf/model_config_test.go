@@ -2,6 +2,7 @@ package conf
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -105,6 +106,7 @@ func TestLoadExampleConfig(t *testing.T) {
 	// 工具出站策略：yaml key 拼错时不会报错、不会告警，只是静默不生效
 	// （本项目已因此在 configs 上踩过两次），所以逐个断言真的绑上了。
 	if len(c.Agent.ToolAllowHosts) == 0 {
+
 		t.Error("agent.tool_allow_hosts 未绑定：示例配置应给出联调用主机名单")
 	}
 	bound := false
@@ -130,5 +132,35 @@ func TestLoadExampleConfig(t *testing.T) {
 	if c.LLM.DefaultEmbedDim != c.Milvus.Dim {
 		t.Errorf("维度不一致: llm.default_embed_dim=%d, milvus.dim=%d",
 			c.LLM.DefaultEmbedDim, c.Milvus.Dim)
+	}
+
+	// PDF 引擎与格式白名单同样逐个断言绑定：
+	// allowed_types 里出现 pkg/parser 不支持的格式，文件能上传但必然解析失败；
+	// mineru.timeout 拼错则回落到代码默认值，运维改配置却看不到效果。
+	for _, want := range []string{"pdf", "docx", "pptx", "xlsx", "html", "csv", "md", "txt"} {
+		found := false
+		for _, t := range c.RAG.AllowedTypes {
+			if strings.EqualFold(t, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("rag.allowed_types 缺少 %q（示例配置应与 parser 支持的格式一致）", want)
+		}
+	}
+	if c.RAG.PDFParser != "local" {
+		t.Errorf(`rag.pdf_parser 应为 "local"，实际 %q`, c.RAG.PDFParser)
+	}
+	if c.RAG.MinerU.Timeout <= 0 {
+		t.Errorf("rag.mineru.timeout 未绑定: %v", c.RAG.MinerU.Timeout)
+	}
+	if c.RAG.MinerU.MaxResponseMB <= 0 {
+		t.Errorf("rag.mineru.max_response_mb 未绑定: %d", c.RAG.MinerU.MaxResponseMB)
+	}
+	// 示例配置选 local 时 base_url 必须为空；两者同时出现会让用户照抄到
+	// 一个"配了但没启用"的矛盾状态。
+	if c.RAG.PDFParser == "local" && c.RAG.MinerU.BaseURL != "" {
+		t.Error("pdf_parser=local 时示例配置不应给出 mineru.base_url，避免误导")
 	}
 }

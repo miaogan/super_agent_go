@@ -320,6 +320,18 @@ type ModelConf struct {
 	EnableSparse bool `yaml:"enable_sparse"`
 }
 
+// MinerUConf MinerU PDF 解析服务接入配置（见 pkg/parser/mineru.go）。
+type MinerUConf struct {
+	// BaseURL 服务根地址，不含 /file_parse。例：http://mineru.internal:8000
+	BaseURL string `yaml:"base_url"`
+	// Timeout 单次解析超时。版面分析很慢，默认 120s。
+	Timeout time.Duration `yaml:"timeout"`
+	// MaxResponseMB 响应体上限，默认 32MB。
+	MaxResponseMB int `yaml:"max_response_mb"`
+	// AuthToken 非空时以 Authorization: Bearer 发送。
+	AuthToken string `yaml:"auth_token"`
+}
+
 // RAGConf 知识库与检索
 type RAGConf struct {
 	// 默认切片参数
@@ -397,6 +409,20 @@ type RAGConf struct {
 
 	// 允许的文件类型
 	AllowedTypes []string `yaml:"allowed_types"`
+
+	// ---- PDF 解析引擎 ----
+	//
+	// PDFParser 取值：
+	//   local  —— 内置纯 Go 文本抽取（pkg/parser）。**无 OCR**：
+	//             扫描件 / 图片型 PDF 抽不出内容，会明确报解析失败。
+	//   mineru —— 调用 MinerU HTTP 服务（OCR + 版面还原，返回 Markdown）。
+	//
+	// ★ pdf_parser=mineru 而 mineru.base_url 为空时，rag_service 启动即失败。
+	//   不做"配置了就悄悄回退本地"的处理：那会让运维以为正文来自 MinerU，
+	//   实际入库的是扫描件抽出来的空白文本，症状是"什么都搜不到"，
+	//   而这种问题在检索质量上完全看不出根因。
+	PDFParser string     `yaml:"pdf_parser"`
+	MinerU    MinerUConf `yaml:"mineru"`
 
 	// file_url 拉取配置（SSRF 防护相关）
 	FetchTimeout       time.Duration `yaml:"fetch_timeout"`
@@ -831,6 +857,11 @@ func applyEnv(c *Config) {
 	setDur("AEGIS_RAG__FETCH_TIMEOUT", &c.RAG.FetchTimeout)
 	setInt("AEGIS_RAG__FETCH_MAX_FILE_SIZE_MB", &c.RAG.FetchMaxFileSizeMB)
 	setBool("AEGIS_RAG__ALLOW_PRIVATE_IPS", &c.RAG.AllowPrivateIPs)
+	setStr("AEGIS_RAG__PDF_PARSER", &c.RAG.PDFParser)
+	setStr("AEGIS_RAG__MINERU__BASE_URL", &c.RAG.MinerU.BaseURL)
+	setDur("AEGIS_RAG__MINERU__TIMEOUT", &c.RAG.MinerU.Timeout)
+	setInt("AEGIS_RAG__MINERU__MAX_RESPONSE_MB", &c.RAG.MinerU.MaxResponseMB)
+	setStr("AEGIS_RAG__MINERU__AUTH_TOKEN", &c.RAG.MinerU.AuthToken)
 
 	// 混合检索（多来源）
 	setStr("AEGIS_RAG__MERGE_STRATEGY", &c.RAG.MergeStrategy)
@@ -999,7 +1030,20 @@ func Default() *Config {
 			IngestWorkers:        4,
 			MaxFileSizeMB:        50,
 			MaxPages:             500,
-			AllowedTypes:         []string{"pdf", "docx", "html", "xlsx", "md", "txt"},
+			// 与 pkg/parser 实际支持的格式保持一致：
+			// 白名单放进 parser 不支持的类型，文件能上传但必然解析失败，
+			// 用户看到的只有一句"解析失败"，排查成本极高。
+			AllowedTypes: []string{
+				"pdf", "docx", "pptx", "xlsx",
+				"html", "htm", "csv", "md", "markdown", "txt", "json",
+			},
+			// PDF 默认走本地解析（无外部依赖，代价是不支持扫描件）
+			PDFParser: "local",
+			MinerU: MinerUConf{
+				BaseURL:       "",
+				Timeout:       120 * time.Second,
+				MaxResponseMB: 32,
+			},
 			// file_url 拉取：10s 超时 + 20MB 上限 + 默认拒绝内网 IP（SSRF 防护）
 			FetchTimeout:           10 * time.Second,
 			FetchMaxFileSizeMB:     20,

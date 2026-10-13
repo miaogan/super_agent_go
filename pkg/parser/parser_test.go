@@ -3,13 +3,20 @@ package parser
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"errors"
 	"strings"
 	"testing"
 )
 
+// testParse 是 Parse 的测试封装：被测函数需要 ctx（PDF 可能走远程服务），
+// 而这些用例都不依赖取消语义，统一传 Background。
+func testParse(ft string, raw []byte) (string, error) {
+	return Parse(context.Background(), ft, raw)
+}
+
 func TestParse_text(t *testing.T) {
-	out, err := Parse("txt", []byte("  hello\nworld  "))
+	out, err := testParse("txt", []byte("  hello\nworld  "))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -19,16 +26,32 @@ func TestParse_text(t *testing.T) {
 }
 
 func TestParse_empty(t *testing.T) {
-	_, err := Parse("txt", nil)
+	_, err := testParse("txt", nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
 }
 
+// TestParse_unsupported 仍不支持的类型必须明确拒绝，不能被当成文本透传。
 func TestParse_unsupported(t *testing.T) {
-	_, err := Parse("pptx", []byte("garbage"))
-	if !errors.Is(err, ErrUnsupportedFormat) {
-		t.Fatalf("expected ErrUnsupportedFormat, got %v", err)
+	// doc/xls/ppt 是 OLE 复合文档（不是 zip），纯 Go 解析不可靠；
+	// 图片需要 OCR，属 MinerU 的能力范围。
+	for _, ft := range []string{"doc", "xls", "ppt", "zip", "rar", "png", "jpg"} {
+		if _, err := testParse(ft, []byte("garbage")); !errors.Is(err, ErrUnsupportedFormat) {
+			t.Errorf("%s 应判为不支持的格式, got %v", ft, err)
+		}
+	}
+}
+
+// TestParse_pptxNowSupported pptx 已纳入支持，坏文件应报"解析失败"
+// 而不是"不支持"——两者的处置方式不同（重传 vs. 换格式）。
+func TestParse_pptxNowSupported(t *testing.T) {
+	_, err := testParse("pptx", []byte("garbage"))
+	if errors.Is(err, ErrUnsupportedFormat) {
+		t.Fatalf("pptx 已支持，不应再报不支持: %v", err)
+	}
+	if !errors.Is(err, ErrParseFailed) {
+		t.Fatalf("坏 pptx 应报解析失败, got %v", err)
 	}
 }
 
@@ -38,7 +61,7 @@ func TestParse_binaryDetection(t *testing.T) {
 	for i := range bin {
 		bin[i] = 0
 	}
-	_, err := Parse("dat", bin)
+	_, err := testParse("dat", bin)
 	if !errors.Is(err, ErrUnsupportedFormat) {
 		t.Fatalf("expected ErrUnsupportedFormat, got %v", err)
 	}
@@ -47,7 +70,7 @@ func TestParse_binaryDetection(t *testing.T) {
 func TestParse_ext(t *testing.T) {
 	// 扩展名带点、大写、空格都能归一化
 	for _, ft := range []string{"PDF", ".pdf", " Pdf ", "pdf"} {
-		_, err := Parse(ft, []byte("not a real pdf"))
+		_, err := testParse(ft, []byte("not a real pdf"))
 		// 损坏的 PDF 走 ErrParseFailed 而不是 ErrUnsupportedFormat（类型支持但内容坏了）
 		if err == nil {
 			t.Fatalf("%s: expected error", ft)
@@ -63,7 +86,7 @@ func TestParse_pdfWithContent(t *testing.T) {
 	// ledongthuc/pdf 会打开成功但 NumPage=0 或 Page.V.IsNull
 	// 我们验证这种情况下返回 ErrParseFailed 而非空串
 	raw := []byte("%PDF-1.4\n%%EOF")
-	_, err := Parse("pdf", raw)
+	_, err := testParse("pdf", raw)
 	if err == nil {
 		t.Fatal("expected error for degenerate PDF")
 	}
@@ -71,7 +94,7 @@ func TestParse_pdfWithContent(t *testing.T) {
 
 func TestParse_xlsxDegenerate(t *testing.T) {
 	raw := []byte("PK\x03\x04invalid")
-	_, err := Parse("xlsx", raw)
+	_, err := testParse("xlsx", raw)
 	if err == nil {
 		t.Fatal("expected error for degenerate XLSX")
 	}
@@ -79,7 +102,7 @@ func TestParse_xlsxDegenerate(t *testing.T) {
 
 func TestParse_docxDegenerate(t *testing.T) {
 	raw := []byte("PK\x03\x04invalid")
-	_, err := Parse("docx", raw)
+	_, err := testParse("docx", raw)
 	if err == nil {
 		t.Fatal("expected error for degenerate DOCX")
 	}
@@ -110,7 +133,7 @@ func TestParse_docxExtractsPlainText(t *testing.T) {
 	}
 	_ = zw.Close()
 
-	out, err := Parse("docx", buf.Bytes())
+	out, err := testParse("docx", buf.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
