@@ -8,8 +8,11 @@
 // 防护策略（分层）：
 //  1. 协议白名单：只允许 http/https
 //  2. IP 字面量拒绝：host 直接是 IP 时不允许（DNS 绕过的前提）
-//  3. DNS 解析后二次校验：解析出的 IP 命中私有网段 → 拒绝
-//  4. DNS 重绑定防护：并发多次解析比对（同一 host 若同时返回公网+内网 IP，拒绝）
+//  3. DNS 解析后校验：解析出的 IP 命中私有/保留网段 → 拒绝
+//  4. 多次解析取并集：并发解析 n 次，把**所有**返回过的 IP 合并去重，
+//     其中任一命中内网即整体拒绝。注意这不是"结果不一致就拒绝"——
+//     两次都返回不同公网 IP（正常轮询）是允许的；拦的是并集里出现过内网地址。
+//     真正的重绑定窗口由调用方在 dial 层 resolve-and-pin 关闭（见 pkg/fetch）。
 package ssrf
 
 import (
@@ -257,11 +260,15 @@ func IsPrivateIP(ip net.IP) bool {
 	return false
 }
 
-// resolveWithRetry 多次并发 DNS 解析，检测 DNS 重绑定。
+// resolveWithRetry 并发解析 n 次，返回所有出现过的 IP 并集（去重）。
 //
-// DNS 重绑定攻击：攻击者控制恶意 DNS 服务器，第一次返回公网 IP（通过
-// 首轮 SSRF 校验），后续请求返回内网 IP。nslookup 并发几次不同结果时
-// 直接拒绝。
+// DNS 重绑定攻击：攻击者控制 DNS 服务器，第一次返回公网 IP（通过首轮校验），
+// 后续请求改返回内网 IP。这里靠"错开时间窗口的多次解析 + 并集全部参与判定"
+// 来压缩该窗口：只要某一次解析露出内网地址，整体就拒绝。
+//
+// 局限：并集判定无法覆盖"两次都返回不同公网 IP、真正连接时才换成内网"的
+// 极端情形。彻底关闭需要在连接点固定已校验的 IP，见 pkg/fetch 的
+// dialContextFunc。
 func resolveWithRetry(ctx context.Context, host string, n int) ([]net.IP, error) {
 	if n < 1 {
 		n = 1

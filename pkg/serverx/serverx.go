@@ -597,7 +597,14 @@ func (rt *Runtime) shutdown(ctx context.Context) error {
 // ---------- Nacos ----------
 
 // NacosRegistry 抽象 Nacos 客户端，避免 pkg 直接依赖具体 SDK 造成耦合。
-// 生产实现见 pkg/nacos，当前由服务层注入。
+//
+// ★ 当前状态：接口与本文件内的注册/注销流程已就绪，但**没有任何实现**，
+//
+//	也没有调用方——六个服务的 cmd/main.go 从未调用 SetRegistry，
+//	因此 initNacos 恒走 registry==nil 分支，打印
+//	"nacos enabled but registry not wired yet, running in direct mode"，
+//	实际全部经 WithHostPorts 直连。
+//	这里刻意不引入 SDK 依赖：接入时只需提供一个实现 + 在 main 里注入。
 type NacosRegistry interface {
 	Register(ctx context.Context, serviceName, ip string, port int, meta map[string]string) error
 	Deregister(ctx context.Context, serviceName, ip string, port int) error
