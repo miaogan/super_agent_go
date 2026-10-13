@@ -502,6 +502,27 @@ func (s *RagService) Retrieve(ctx context.Context, req *ragv1.RetrieveReq) (*rag
 		}, nil
 	}
 
+	// ★ 逐个校验 kb_ids 归属。
+	//
+	//   检索入口的 kb_ids 直接来自请求体（gateway/internal/handler/rag.go 的
+	//   Retrieve 原样透传 req.KbIds），过去不做任何校验；而向量侧的租户过滤
+	//   条件是 `(tenant == "" or tenant == <请求租户>)`，ingest 又从不写
+	//   Tenant，所以每一行的 tenant 都是空串 —— 那个 OR 让过滤恒真。
+	//   两者叠加：任何登录用户传入他人 kb_id（自增整数，可枚举）即可取回
+	//   其知识库切片正文。
+	//
+	//   这里按与 KB 级接口一致的读语义校验（同租户可读）。注意没有复用
+	//   docAccess 的"拒绝 uid==0"：agent_service 会经内部 RPC 调本方法，
+	//   沿用 checkKBPermission 的免身份放行以免打断内部链路。
+	//   真正的租户隔离还需要 ingest 写入 Tenant 才有第二道防线
+	//   （见 pipeline.go）。
+	//
+	// 任一 kb_id 无权限即整体拒绝：静默剔除被过滤的那个会让调用方以为
+	// 检索范围就是自己请求的范围，只是结果少了些。
+	if err := s.authorizeKBIDs(ctx, req.GetIdentity(), req.GetKbIds()); err != nil {
+		return nil, err
+	}
+
 	res, err := s.engine.Retrieve(ctx, &retrieve.Request{
 		Query:          req.GetQuery(),
 		KBIDs:          req.GetKbIds(),
@@ -518,8 +539,26 @@ func (s *RagService) Retrieve(ctx context.Context, req *ragv1.RetrieveReq) (*rag
 	return toRetrieveResp(res), nil
 }
 
+// authorizeKBIDs 校验调用方对每个 kb_id 都有读权限。
+//
+// 空列表不报错：agent 未绑定知识库时检索按既有逻辑走全库或返回空，
+// 那不是权限问题，交由上层语义处理。
+func (s *RagService) authorizeKBIDs(ctx context.Context, id *commonv1.Identity, kbIDs []int64) error {
+	for _, kbID := range kbIDs {
+		if _, err := s.kbAccess(ctx, id, kbID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *RagService) DebugRetrieve(ctx context.Context, req *ragv1.DebugRetrieveReq) (*ragv1.DebugRetrieveResp, error) {
 	if err := s.mock.Sleep(ctx); err != nil {
+		return nil, err
+	}
+	// 网关侧该路由已限 admin scope，但 Kitex 内部调用不经过网关，
+	// 所以这里仍要自己校验一遍归属，不能依赖上游。
+	if err := s.authorizeKBIDs(ctx, req.GetIdentity(), req.GetKbIds()); err != nil {
 		return nil, err
 	}
 	res, err := s.engine.Retrieve(ctx, &retrieve.Request{

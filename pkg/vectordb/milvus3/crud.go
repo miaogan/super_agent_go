@@ -245,12 +245,16 @@ func idAt(rs milvusclient.ResultSet, i int) (string, bool) {
 
 // buildFilter 由检索请求构造 Milvus 过滤表达式。
 //
-// ★ Tenant 的写法为什么是 `(tenant == "" or tenant == "x")`：
+// ★ Tenant 写成 `(tenant == "" or tenant == "x")` 的原因与遗留风险：
 //
-//	ingest 流水线当前不写 Tenant（见包注释），
-//	存量数据该字段为空串。若严格按等值过滤，检索会全部落空 ——
-//	而且不会报错，只表现为「搜不到任何东西」，极难定位。
-//	待pipeline 补上写入后可收紧为 `tenant == "x"`。
+//	新 ingest 的切片已写入 Tenant（rag_service/internal/ingest/pipeline.go），
+//	但改动之前入库的存量数据该字段是空串。若此刻严格按等值过滤，
+//	这些切片会从检索结果里**静默消失** —— 不报错，只表现为"搜不到东西"。
+//	所以保留 `== ""` 这一支只是为了不砸掉存量数据，它同时意味着：
+//	在该 KB 的向量完成 tenant 回填之前，这一条不构成租户隔离。
+//	真正的隔离目前依赖检索入口对 kb_ids 的归属校验
+//	（rag_service/internal/service/rag.go 的 authorizeKBIDs）。
+//	回填完成后应把这里收紧为 `tenant == "x"` 并删除 `== ""` 分支。
 func buildFilter(req *vectordb.SearchRequest) string {
 	var clauses []string
 

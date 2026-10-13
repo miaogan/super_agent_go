@@ -213,6 +213,111 @@ func TestRetryDocument_DeniedBeforeIngest(t *testing.T) {
 	}
 }
 
+// TestRetrieve_AuthorizesRequestedKBIDs 检索入口的 kb_ids 来自请求体，
+// 必须逐个校验归属。
+//
+// 这条路径过去可以越权：租户过滤条件是 `(tenant=="" or tenant==请求租户)`，
+// 而 ingest 曾不写 Tenant，使该过滤恒真；配合未校验的 kb_ids，
+// 任何登录用户传入他人 kb_id（自增整数，可枚举）即可取回其知识库切片正文。
+//
+// 断言时 engine 传 nil：鉴权必须在调用 engine 之前完成，
+// 一旦漏过会直接 panic，因此这同时是顺序守卫。
+func TestRetrieve_AuthorizesRequestedKBIDs(t *testing.T) {
+	s, _ := newTestService(t)
+	ctx := context.Background()
+
+	cases := []struct {
+		name string
+		id   *commonv1.Identity
+		deny bool
+	}{
+		{"属主可检索", user(ownerUID, tenant), false},
+		{"同租户可检索", user(2000, tenant), false},
+		{"admin 可检索", user(3000, "other", "admin"), false},
+		{"跨租户拒绝", user(2000, "evil"), true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := s.authorizeKBIDs(ctx, c.id, []int64{kbID})
+			if c.deny && err == nil {
+				t.Fatal("应被拒绝")
+			}
+			if !c.deny && err != nil {
+				t.Fatalf("应放行, 实际 %v", err)
+			}
+			if c.deny {
+				if got := errno.CodeOf(err); got != errno.ErrKBAccessDenied {
+					t.Fatalf("应判为越权(40422)，实际 [%d] %v", got, err)
+				}
+			}
+		})
+	}
+
+	// 端到端：拒绝必须发生在调用 engine 之前（engine 为 nil，漏过即 panic）
+	s.cfg.EnableRAG = true
+	for _, id := range []*commonv1.Identity{user(2000, "evil")} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("跨租户请求漏过鉴权并进入了 engine（panic: %v）", r)
+				}
+			}()
+			if _, err := s.Retrieve(ctx, &ragv1.RetrieveReq{
+				Query: "x", KbIds: []int64{kbID}, Identity: id,
+			}); err == nil {
+				t.Fatal("应被拒绝")
+			}
+		}()
+	}
+}
+
+// TestRetrieve_DeniedIfAnyKBForbidden 多个 kb_id 中夹一个无权项时整体拒绝。
+// 静默剔除会让调用方以为检索范围就是自己请求的范围，只是结果偏少。
+func TestRetrieve_DeniedIfAnyKBForbidden(t *testing.T) {
+	s, _ := newTestService(t)
+	s.cfg.EnableRAG = true
+	// 再造一个属于别的租户的 KB
+	if err := s.meta.CreateKB(context.Background(), &ragv1.KnowledgeBase{
+		KbId: 888, Name: "other", OwnerUid: 7777, Tenant: "evilcorp",
+	}); err != nil {
+		t.Fatalf("建 KB 失败: %v", err)
+	}
+	_, err := s.Retrieve(context.Background(), &ragv1.RetrieveReq{
+		Query: "x", KbIds: []int64{kbID, 888}, Identity: user(2000, tenant),
+	})
+	if err == nil {
+		t.Fatal("夹带无权 kb_id 应整体拒绝")
+	}
+	if got := errno.CodeOf(err); got != errno.ErrKBAccessDenied {
+		t.Fatalf("应判为越权, 实际 [%d] %v", got, err)
+	}
+}
+
+// TestRetrieve_EmptyKBIDsNotAnAuthzError 空 kb_ids 不是权限问题：
+// agent 未绑定知识库时按既有语义走，不应在这里报错。
+func TestRetrieve_EmptyKBIDsNotAnAuthzError(t *testing.T) {
+	s, _ := newTestService(t)
+	// 空列表直接放行给上层语义处理（engine 为 nil，不能真的走完整 Retrieve）
+	if err := s.authorizeKBIDs(context.Background(), user(ownerUID, tenant), nil); err != nil {
+		t.Fatalf("空 kb_ids 不应判为越权: %v", err)
+	}
+}
+
+// TestDebugRetrieve_AuthorizesKBIDs DebugRetrieve 虽在网关侧限 admin，
+// 但 Kitex 内部调用不经过网关，服务侧仍需自校验。
+func TestDebugRetrieve_AuthorizesKBIDs(t *testing.T) {
+	s, _ := newTestService(t)
+	_, err := s.DebugRetrieve(context.Background(), &ragv1.DebugRetrieveReq{
+		Query: "x", KbIds: []int64{kbID}, Identity: user(2000, "evil"),
+	})
+	if err == nil {
+		t.Fatal("跨租户 DebugRetrieve 应被拒绝")
+	}
+	if got := errno.CodeOf(err); got != errno.ErrKBAccessDenied {
+		t.Fatalf("应判为越权, 实际 [%d] %v", got, err)
+	}
+}
+
 // TestDocumentOps_DenyMissingKBParent 文档指向一个不存在的 KB 时，
 // 不能因为"取不到 KB 就没法判权限"而放行。
 func TestDocumentOps_DenyMissingKBParent(t *testing.T) {

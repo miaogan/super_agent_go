@@ -247,6 +247,10 @@ func (p *Pipeline) vectorize(ctx context.Context, kb *ragv1.KnowledgeBase, rec *
 				SparseVector: sparseForIndex(resp.GetSparseEmbeddings(), i),
 				PageNo:       c.GetPageNo(),
 				TokenCount:   c.GetTokenCount(),
+				// 取 KB 自身租户而非调用方 identity：补偿任务重跑时没有原始
+				// 调用者身份，而切片必须始终带它所属知识库的租户，
+				// 否则向量侧的租户过滤条件对空 tenant 恒真、等于不过滤。
+				Tenant: kb.GetTenant(),
 			})
 			chunkIDs = append(chunkIDs, c.GetChunkId())
 		}
