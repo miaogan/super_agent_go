@@ -470,6 +470,14 @@ services:
     # 必须挂到 /var/lib/postgresql 而不是 /var/lib/postgresql/data
     volumes:
       - pg-data:/var/lib/postgresql
+      # ★ 官方镜像只在数据目录**为空**时执行 /docker-entrypoint-initdb.d 下的脚本，
+      #   所以这一行只影响全新部署（第一次 up），对已有 pg-data 卷是纯 no-op，
+      #   不会重跑、也不会覆盖或删任何东西。
+      #   缺了这一行时，全新卷起来后库里一张表都没有：非 mock 模式下
+      #   pgstore 会失败并回落内存仓储，表现是"服务正常但重启就丢数据"，
+      #   而不是显式的建库错误。
+      #   已有库的后续 schema 变更请走 configs/postgres/migrate_*.sql 手工执行。
+      - ./configs/postgres/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s

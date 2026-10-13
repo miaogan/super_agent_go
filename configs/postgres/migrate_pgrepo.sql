@@ -1,3 +1,9 @@
+-- ★ 历史增量脚本：仅用于升级「早于本功能的老库」。
+--   新库一律由 configs/postgres/init.sql 一次建全，init.sql 已包含本文件的全部表。
+--   因此日常改 schema 请改 init.sql（或对已有库写新的 migrate_*.sql），不要改本文件，
+--   否则会出现两份定义不一致、改了一份不生效的情况。
+--   挂载入口：docker-compose.yml 的 postgres 服务把 init.sql 挂到 /docker-entrypoint-initdb.d/。
+
 -- 对已有 DB 的增量 migration（不丢 demo 数据）
 
 -- 1) users.uid 加 BIGSERIAL 行为（已有行 uid 保留）
