@@ -40,6 +40,20 @@ llm:
   # provider: rawhttp（零第三方依赖薄客户端）/ eino（未接入）/ mock
   provider: rawhttp
 
+  # ---- 对话模型级降级 ----
+  # 主模型出现连接失败 / 超时 / 408 / 429 / 5xx 时，按 models[].priority
+  # 升序换下一个对话模型重试（请求点名的模型永远先试）。
+  # 每个候选只试一次，所以最坏耗时 = 候选数 × 单模型 timeout。
+  #
+  # 不降级的情况：4xx（鉴权/参数，换模型必然同样失败）、调用方 ctx 已超时、
+  # 流式已经开始收到 chunk（此时换模型会把两段输出拼成一条错误的答案）。
+  #
+  # 反向开关：false（含省略不写）= 启用降级。
+  # 之所以不用 fallback_enabled，是因为普通 bool 零值是 false ——
+  # 任何绕过 Default() 的构造路径都会静默变成"降级关闭"，而这是默认该开的功能。
+  # 环境变量：AEGIS_LLM__FALLBACK_DISABLED
+  fallback_disabled: false
+
   # 默认对话模型（降级链首选）
   default_model: qwen3.8-max
 

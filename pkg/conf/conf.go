@@ -250,6 +250,14 @@ type LLMConf struct {
 	DefaultEmbedDim int `yaml:"default_embed_dim"`
 	// 请求超时
 	Timeout time.Duration `yaml:"timeout"`
+	// FallbackDisabled 关闭对话模型按 priority 的降级重试。
+	//
+	// ★ 为什么是反向字段：模型级降级是 README 承诺的能力，默认应当**开启**。
+	//   若写成 fallback_enabled，普通 bool 的零值是 false，任何不经过
+	//   Default() 的构造路径（测试里直接 new LLMConf、或未来某处只填部分字段）
+	//   都会静默变成"降级关闭"——这类问题在日志和返回上都看不出来。
+	//   反向字段让零值等于启用，不需要记住再设一次。
+	FallbackDisabled bool `yaml:"fallback_disabled"`
 	// 单次请求最大 token
 	MaxTokens int `yaml:"max_tokens"`
 
@@ -834,6 +842,7 @@ func applyEnv(c *Config) {
 	setStr("AEGIS_LLM__DEFAULT_MODEL", &c.LLM.DefaultModel)
 	setStr("AEGIS_LLM__DEFAULT_EMBED_MODEL", &c.LLM.DefaultEmbedModel)
 	setInt("AEGIS_LLM__DEFAULT_EMBED_DIM", &c.LLM.DefaultEmbedDim)
+	setBool("AEGIS_LLM__FALLBACK_DISABLED", &c.LLM.FallbackDisabled)
 
 	// RAG
 	setBool("AEGIS_RAG__ENABLE_RAG", &c.RAG.EnableRAG)

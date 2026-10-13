@@ -2,6 +2,7 @@ package conf
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -162,5 +163,38 @@ func TestLoadExampleConfig(t *testing.T) {
 	// 一个"配了但没启用"的矛盾状态。
 	if c.RAG.PDFParser == "local" && c.RAG.MinerU.BaseURL != "" {
 		t.Error("pdf_parser=local 时示例配置不应给出 mineru.base_url，避免误导")
+	}
+}
+
+// TestFallbackDisabledKeyBinds 验证 llm.fallback_disabled 真的被解析。
+//
+// ★ 为什么不能只断言"示例配置里它是 false"：Default() 的零值本就是 false，
+//
+//	key 拼错时结果同样是 false，断言看不出区别 —— 而这恰好是本项目
+//	在 configs 上踩过两次的坑（写了配置、代码不认、无任何报错）。
+//	所以这里写一份把值设为 true 的临时配置，绑不上就会被读成 false。
+func TestFallbackDisabledKeyBinds(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "c.yaml")
+	body := "llm:\n  provider: rawhttp\n  fallback_disabled: true\n"
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+	if !c.LLM.FallbackDisabled {
+		t.Error("llm.fallback_disabled=true 未绑定到 LLMConf.FallbackDisabled")
+	}
+
+	// env 覆盖同样要生效（字段名拼错时 setBool 是静默无操作）
+	t.Setenv("AEGIS_LLM__FALLBACK_DISABLED", "true")
+	c2, err := Load(p)
+	if err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+	if !c2.LLM.FallbackDisabled {
+		t.Error("AEGIS_LLM__FALLBACK_DISABLED 未生效")
 	}
 }

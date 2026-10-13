@@ -22,10 +22,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -127,6 +130,94 @@ func (p *Provider) resolve(name string) (conf.ModelConf, error) {
 	return conf.ModelConf{}, fmt.Errorf("rawhttp: 未找到模型 %q", name)
 }
 
+// StatusError 上游返回非 200。
+//
+// 单独成类型是为了让上层能按状态码判断"能不能换个模型重试"。
+// 状态码原本只混在错误文本里，靠解析文本取码既脆又会在文案改动时静默失效。
+// Error() 保持与旧文本完全一致，不影响任何既有断言。
+type StatusError struct {
+	Path string
+	Code int
+	Body string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("rawhttp: %s 状态 %d: %s", e.Path, e.Code, truncate(e.Body, 500))
+}
+
+// chatCandidates 返回可用于对话降级的模型，按 Priority 升序（越小越优先）。
+//
+// 请求指定的模型**永远排第一**：调用方点名要谁就该先用谁，降级只在它失败后发生。
+// 排除掉 rerank / embed 模型——它们走的是完全不同的接口
+// （DashScope 原生路径），拿它们当对话备选必然失败，只会白耗一次超时。
+//
+// 只有 1 个候选时行为与改动前完全相同（单次调用、不重试）。
+func (p *Provider) chatCandidates(requested string) []conf.ModelConf {
+	m, err := p.resolve(requested)
+	if err != nil {
+		return nil
+	}
+	if p.cfg.FallbackDisabled {
+		return []conf.ModelConf{m}
+	}
+
+	embedModel, rerankModel := p.cfg.DefaultEmbedModel, p.rerankModel()
+	out := []conf.ModelConf{m}
+	for _, c := range p.cfg.Models {
+		if c.Name == m.Name || c.Status == "disabled" {
+			continue
+		}
+		if c.Name == embedModel || (rerankModel != "" && c.Name == rerankModel) {
+			continue
+		}
+		// embed/rerank 模型也可能不叫默认名，用特征字段兜一层
+		if c.EmbedNativePath != "" || c.RerankPath != "" {
+			continue
+		}
+		out = append(out, c)
+	}
+	// 稳定排序：priority 相同则保持配置顺序，避免同优先级时降级目标随机漂移
+	sorted := out[1:]
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Priority < sorted[j].Priority })
+	return append([]conf.ModelConf{m}, sorted...)
+}
+
+// retriableChatErr 判断一次对话失败是否值得改用另一个模型。
+//
+// 只重试"换一个厂商可能就没事"的错误：
+//   - 连接层失败（DNS、拒绝连接、读写超时）
+//   - 408 / 429 / 5xx（过载、限流、服务端故障）
+//
+// 不重试：
+//   - 调用方 ctx 已取消或期限已过 —— 再打一个模型只会让总耗时无界
+//   - 其它 4xx（鉴权、参数不合法）—— 换模型必然同样失败，白等一次超时
+//   - 本地错误（序列化、响应解码）—— 与端点无关
+func retriableChatErr(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+	var se *StatusError
+	if errors.As(err, &se) {
+		switch {
+		case se.Code == http.StatusRequestTimeout, se.Code == http.StatusTooManyRequests:
+			return true
+		case se.Code >= 500:
+			return true
+		}
+		return false
+	}
+	// http.Client.Do 的失败一律包在 *url.Error 里，据此区分传输层与本地错误
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne)
+}
+
 // modelName 逻辑名 → 厂商真实模型名
 func modelName(m conf.ModelConf) string {
 	if m.RealModel != "" {
@@ -138,12 +229,42 @@ func modelName(m conf.ModelConf) string {
 // ---------- Chat ----------
 
 // Chat 同步对话
+// Chat 非流式对话，支持按 priority 的模型级降级。
+//
+// 降级只在 retriableChatErr 判为可重试时发生，且这里每次重试都是
+// "整个请求重发"，不存在半途混合两个模型输出的问题（流式的约束见 ChatStream）。
 func (p *Provider) Chat(ctx context.Context, req *provider.ChatRequest) (*provider.ChatResponse, error) {
-	m, err := p.resolve(req.Model)
-	if err != nil {
-		return nil, err
+	cands := p.chatCandidates(req.Model)
+	if len(cands) == 0 {
+		return nil, fmt.Errorf("rawhttp: 未找到模型 %q", req.Model)
 	}
 
+	var lastErr error
+	for i, m := range cands {
+		out, err := p.attemptChat(ctx, req, m)
+		if err == nil {
+			if i > 0 {
+				// 如实记录：上层必须能把"降级了"这件事告诉用户，绝不静默
+				out.Degraded = true
+				out.DegradeReason = fmt.Sprintf("模型 %s 调用失败（%v），已降级到 %s",
+					cands[0].Name, lastErr, m.Name)
+				logger.Warn(ctx, "rawhttp: 对话已降级到其他模型",
+					"from", cands[0].Name, "to", m.Name, "reason", lastErr)
+			}
+			return out, nil
+		}
+		lastErr = err
+		if i+1 >= len(cands) || !retriableChatErr(ctx, err) {
+			return nil, err
+		}
+		logger.Warn(ctx, "rawhttp: 对话失败，改用下一个候选模型",
+			"model", m.Name, "next", cands[i+1].Name, "err", err)
+	}
+	return nil, lastErr
+}
+
+// attemptChat 用单个模型发起一次非流式对话。
+func (p *Provider) attemptChat(ctx context.Context, req *provider.ChatRequest, m conf.ModelConf) (*provider.ChatResponse, error) {
 	body := map[string]any{
 		"model":    modelName(m),
 		"messages": toOpenAIMessages(req.Messages),
@@ -173,18 +294,21 @@ func (p *Provider) Chat(ctx context.Context, req *provider.ChatRequest) (*provid
 	p.reqCount.Add(1)
 
 	out := &provider.ChatResponse{
-		Model:        m.Name,
-		FinishReason: resp.Choices[0].FinishReason,
+		Model:    m.Name,
+		Provider: "rawhttp",
 		Usage: provider.Usage{
 			PromptTokens:     int32(resp.Usage.PromptTokens),
 			CompletionTokens: int32(resp.Usage.CompletionTokens),
 			TotalTokens:      int32(resp.Usage.TotalTokens),
 		},
-		Provider: "rawhttp",
 	}
+	// ★ Choices 可能为空：部分厂商在内容审核拦截或只返回 usage 时给出空数组。
+	//   旧实现在这里直接取 Choices[0]（且写在长度检查之前），会 panic 整个进程。
 	if len(resp.Choices) > 0 {
-		out.Content = resp.Choices[0].Message.Content
-		for _, tc := range resp.Choices[0].Message.ToolCalls {
+		ch := resp.Choices[0]
+		out.FinishReason = ch.FinishReason
+		out.Content = ch.Message.Content
+		for _, tc := range ch.Message.ToolCalls {
 			out.ToolCalls = append(out.ToolCalls, provider.ToolCall{
 				ID:        tc.ID,
 				Name:      tc.Function.Name,
@@ -199,13 +323,51 @@ func (p *Provider) Chat(ctx context.Context, req *provider.ChatRequest) (*provid
 	return out, nil
 }
 
-// ChatStream 流式对话（SSE）
+// ChatStream 流式对话（SSE），支持模型级降级。
+//
+// ★ 降级窗口只到"响应头确认 200"为止。一旦 beginStream 返回、chunk 通道开始
+//
+//	向上传数据，就绝不能改用另一个模型：那会把两个模型的输出拼成一条回答，
+//	比直接失败更糟（用户看到的是通顺但错误的内容）。因此循环只覆盖
+//	startChatStream，成功之后立即交出错觉不再重试。
 func (p *Provider) ChatStream(ctx context.Context, req *provider.ChatRequest) (<-chan *provider.Chunk, error) {
-	m, err := p.resolve(req.Model)
-	if err != nil {
-		return nil, err
+	cands := p.chatCandidates(req.Model)
+	if len(cands) == 0 {
+		return nil, fmt.Errorf("rawhttp: 未找到模型 %q", req.Model)
 	}
 
+	var lastErr error
+	for i, m := range cands {
+		resp, err := p.startChatStream(ctx, req, m)
+		if err == nil {
+			if i > 0 {
+				logger.Warn(ctx, "rawhttp: 流式对话已降级到其他模型",
+					"from", cands[0].Name, "to", m.Name, "reason", lastErr)
+			}
+			ch := make(chan *provider.Chunk, 32)
+			go func() {
+				defer close(ch)
+				defer resp.Body.Close()
+				p.reqCount.Add(1)
+				p.consumeSSE(ctx, resp.Body, ch)
+			}()
+			return ch, nil
+		}
+		lastErr = err
+		if i+1 >= len(cands) || !retriableChatErr(ctx, err) {
+			return nil, err
+		}
+		logger.Warn(ctx, "rawhttp: 流式建立失败，改用下一个候选模型",
+			"model", m.Name, "next", cands[i+1].Name, "err", err)
+	}
+	return nil, lastErr
+}
+
+// startChatStream 发起流式请求并确认响应头为 200。
+//
+// 成功时返回**尚未读取**的响应，由调用方交给 consumeSSE。
+// 这一层刻意只到"状态码确认"为止，以便调用方在它失败时安全地换模型重试。
+func (p *Provider) startChatStream(ctx context.Context, req *provider.ChatRequest, m conf.ModelConf) (*http.Response, error) {
 	body := map[string]any{
 		"model":    modelName(m),
 		"messages": toOpenAIMessages(req.Messages),
@@ -240,17 +402,13 @@ func (p *Provider) ChatStream(ctx context.Context, req *provider.ChatRequest) (<
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("rawhttp: chat stream 状态 %d: %s", resp.StatusCode, truncate(string(b), 300))
+		return nil, &StatusError{
+			Path: "/v1/chat/completions",
+			Code: resp.StatusCode,
+			Body: string(b),
+		}
 	}
-
-	ch := make(chan *provider.Chunk, 32)
-	go func() {
-		defer close(ch)
-		defer resp.Body.Close()
-		p.reqCount.Add(1)
-		p.consumeSSE(ctx, resp.Body, ch)
-	}()
-	return ch, nil
+	return resp, nil
 }
 
 // consumeSSE 解析 SSE 流。
@@ -704,7 +862,8 @@ func (p *Provider) post(ctx context.Context, m conf.ModelConf, path string, body
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		return fmt.Errorf("rawhttp: %s 状态 %d: %s", path, resp.StatusCode, truncate(string(b), 500))
+		// 用 *StatusError 携带状态码；文本与旧实现一致
+		return &StatusError{Path: path, Code: resp.StatusCode, Body: string(b)}
 	}
 	return jsonx.NewDecoder(resp.Body).Decode(out)
 }
