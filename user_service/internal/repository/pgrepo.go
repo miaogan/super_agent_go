@@ -10,7 +10,9 @@
 //     service 层的错误分支不需要改
 //
 // 当前实现覆盖 auth 链路所需方法：
-//   GetCredential / GetByUID / GetByUsername / BatchGet / List
+//
+//	GetCredential / GetByUID / GetByUsername / BatchGet / List
+//
 // 后续补：Create / Update / Delete / Preference
 package repository
 
@@ -22,9 +24,9 @@ import (
 	"strings"
 	"time"
 
+	userv1 "github.com/aegis/idl/kitex_gen/userv1"
 	"github.com/aegis/pkg/conf"
 	"github.com/aegis/pkg/logger"
-	userv1 "github.com/aegis/idl/kitex_gen/userv1"
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"

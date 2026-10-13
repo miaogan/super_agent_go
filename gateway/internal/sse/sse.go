@@ -29,9 +29,9 @@ import (
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 	hzsse "github.com/cloudwego/hertz/pkg/protocol/sse"
 
+	"github.com/aegis/gateway/internal/middleware"
 	agentv1 "github.com/aegis/idl/kitex_gen/agentv1"
 	agentservice "github.com/aegis/idl/kitex_gen/agentv1/agentservice"
-	"github.com/aegis/gateway/internal/middleware"
 	"github.com/aegis/pkg/logger"
 )
 

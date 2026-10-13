@@ -23,9 +23,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aegis/agent_service/internal/toolexec"
 	agentv1 "github.com/aegis/idl/kitex_gen/agentv1"
 	commonv1 "github.com/aegis/idl/kitex_gen/commonv1"
-	"github.com/aegis/agent_service/internal/toolexec"
 )
 
 // Agent 状态
@@ -722,13 +722,13 @@ func (s *Store) GetTool(ctx context.Context, name string) (*toolexec.ToolDef, er
 	for _, t := range s.tools {
 		if t.GetName() == name && t.GetStatus() == 1 {
 			return &toolexec.ToolDef{
-				Name:        t.GetName(),
-				Description: t.GetDescription(),
-				Type:        t.GetType(),
-				Endpoint:    t.GetEndpoint(),
-				Method:      t.GetMethod(),
+				Name:         t.GetName(),
+				Description:  t.GetDescription(),
+				Type:         t.GetType(),
+				Endpoint:     t.GetEndpoint(),
+				Method:       t.GetMethod(),
 				ParamsSchema: t.GetParamsSchema(),
-				TimeoutMS:   int(t.GetTimeoutMs()),
+				TimeoutMS:    int(t.GetTimeoutMs()),
 			}, nil
 		}
 	}
@@ -928,10 +928,10 @@ func (s *Store) BindAgentTools(_ context.Context, agentID int64, bindings []*age
 		}
 		enabled := b.Enabled
 		m[strings.TrimSpace(b.ToolName)] = &agentv1.AgentToolBinding{
-			AgentId:  agentID,
-			ToolName: strings.TrimSpace(b.ToolName),
-			Enabled:  enabled,
-			Config:   b.Config,
+			AgentId:   agentID,
+			ToolName:  strings.TrimSpace(b.ToolName),
+			Enabled:   enabled,
+			Config:    b.Config,
 			CreatedAt: now,
 		}
 	}

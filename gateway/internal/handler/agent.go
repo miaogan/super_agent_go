@@ -433,14 +433,14 @@ func (d *Deps) handleErr(ctx context.Context, c *app.RequestContext, op string, 
 
 // createToolReq / updateToolReq 共用请求体
 type toolReq struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Type        string `json:"type"`
-	Endpoint    string `json:"endpoint"`
-	Method      string `json:"method"`
+	Name         string `json:"name"`
+	Description  string `json:"description"`
+	Type         string `json:"type"`
+	Endpoint     string `json:"endpoint"`
+	Method       string `json:"method"`
 	ParamsSchema string `json:"params_schema"`
-	TimeoutMs   int32  `json:"timeout_ms"`
-	Status      int32  `json:"status"`
+	TimeoutMs    int32  `json:"timeout_ms"`
+	Status       int32  `json:"status"`
 }
 
 // CreateTool 新建工具（需 admin）

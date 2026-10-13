@@ -70,11 +70,12 @@ type IdentityProvider interface {
 
 // ServerMiddleware Kitex server 中间件：尝试从 req.Identity 注入 ctx。
 // ★ 注意：Kitex server middleware 在 v0.16 里对 protobuf unary RPC 的 req 是 *streaming.Args 包装，
-//   无法直接 type assertion。推荐 handler 入口显式调用
 //
-//	ctx = identity.With(ctx, req.GetIdentity())
+//	  无法直接 type assertion。推荐 handler 入口显式调用
 //
-//   或者用 FromReq(ctx, req.GetIdentity()) 做兜底。
+//		ctx = identity.With(ctx, req.GetIdentity())
+//
+//	  或者用 FromReq(ctx, req.GetIdentity()) 做兜底。
 func ServerMiddleware() endpoint.Middleware {
 	return func(next endpoint.Endpoint) endpoint.Endpoint {
 		return func(ctx context.Context, req, resp interface{}) error {

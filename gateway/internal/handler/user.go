@@ -161,7 +161,8 @@ func (d *Deps) DeleteUser(c *app.RequestContext) {
 // GetPreference 获取当前用户偏好。
 //
 // ★ uid 只从登录身份取，不接受 query/body 覆盖 ——
-//   否则任何人都能读别人的偏好。
+//
+//	否则任何人都能读别人的偏好。
 func (d *Deps) GetPreference(c *app.RequestContext) {
 	uid := idOf(c).GetUid()
 	if uid == 0 {

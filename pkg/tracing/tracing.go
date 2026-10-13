@@ -5,10 +5,11 @@
 //   - kitex.go         Kitex server/client 中间件（跨服务 span 串联）
 //
 // 为什么自研中间件而不用 kitex-contrib/obs-opentelemetry：
-//   该扩展 v0.3.0 停留在 otel 0.39 / kitex 0.5 时代，
-//   依赖 kitex 内部 TraceCarrier 机制，与 kitex v0.16 兼容性无保障；
-//   且我们已有经容器冒烟验证的「metainfo + nphttp2 metadata 双通道透传」
-//   （见 pkg/internalauth）—— traceparent 走同一条路，机制复用、风险为零。
+//
+//	该扩展 v0.3.0 停留在 otel 0.39 / kitex 0.5 时代，
+//	依赖 kitex 内部 TraceCarrier 机制，与 kitex v0.16 兼容性无保障；
+//	且我们已有经容器冒烟验证的「metainfo + nphttp2 metadata 双通道透传」
+//	（见 pkg/internalauth）—— traceparent 走同一条路，机制复用、风险为零。
 package tracing
 
 import (

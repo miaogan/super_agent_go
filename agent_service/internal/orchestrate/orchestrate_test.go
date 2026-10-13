@@ -544,7 +544,7 @@ func TestBuildMessagesOrder(t *testing.T) {
 		{Role: "user", Content: "历史问题1"},
 		{Role: "assistant", Content: "历史回答1"},
 		{Role: "tool", Content: "工具输出"},  // ★ 现在应参与 ReAct 循环
-		{Role: "assistant", Content: ""},     // 仍被过滤（空 content 且非 tool 消息）
+		{Role: "assistant", Content: ""}, // 仍被过滤（空 content 且非 tool 消息）
 		{Role: "user", Content: "历史问题2"},
 	}
 	msgs := o.BuildMessages(AgentPlan{SystemPrompt: "sys"}, "本轮问题", RetrievalContext{}, history)

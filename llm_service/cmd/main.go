@@ -30,70 +30,70 @@ func main() {
 			c := app.Cfg
 
 			// Provider 选择见 providerfactory：mock 模式强制离线，
-				// 否则按 llm.provider 选 eino / rawhttp。
-				// cleanup 交由 serverx 在优雅退出阶段调用，此处转交即可。
-				prov, provCleanup, err := providerfactory.Build(ctx, c, app.MockMode())
-				if err != nil {
-					return nil, fmt.Errorf("构建 Provider 失败: %w", err)
+			// 否则按 llm.provider 选 eino / rawhttp。
+			// cleanup 交由 serverx 在优雅退出阶段调用，此处转交即可。
+			prov, provCleanup, err := providerfactory.Build(ctx, c, app.MockMode())
+			if err != nil {
+				return nil, fmt.Errorf("构建 Provider 失败: %w", err)
+			}
+
+			// ToolResolver：PG 只读查 tools 表，补全 JSON Schema。
+			// 工具解析不是热点，连接池 MaxConns=2 足够。
+			var (
+				toolRes      service.ToolResolver
+				toolResClose func()
+			)
+			if !app.MockMode() {
+				if tr, err := toolresolver.NewPG(ctx, c.Postgres); err == nil {
+					toolRes = tr
+					toolResClose = func() { tr.Close() }
+					logger.Info(ctx, "llm_service: ToolResolver 已注入（PG 只读）")
+				} else {
+					logger.Warn(ctx, "llm_service: ToolResolver 未注入（工具调用将被忽略）",
+						"err", err)
 				}
+			}
 
-				// ToolResolver：PG 只读查 tools 表，补全 JSON Schema。
-				// 工具解析不是热点，连接池 MaxConns=2 足够。
-				var (
-					toolRes      service.ToolResolver
-					toolResClose func()
-				)
-				if !app.MockMode() {
-					if tr, err := toolresolver.NewPG(ctx, c.Postgres); err == nil {
-						toolRes = tr
-						toolResClose = func() { tr.Close() }
-						logger.Info(ctx, "llm_service: ToolResolver 已注入（PG 只读）")
-					} else {
-						logger.Warn(ctx, "llm_service: ToolResolver 未注入（工具调用将被忽略）",
-							"err", err)
-					}
+			llmservice.RegisterService(svr, service.New(service.Options{
+				Provider:           prov,
+				Mock:               app.FaultInjector(),
+				CacheEnabled:       c.LLM.CacheEnabled,
+				CacheTTL:           c.LLM.EmbedCacheTTL,
+				DefaultModel:       c.LLM.DefaultModel,
+				DefaultEmbedModel:  c.LLM.DefaultEmbedModel,
+				DefaultEmbedDim:    c.LLM.DefaultEmbedDim,
+				DefaultRerankModel: c.RAG.RerankModel,
+				MaxTokens:          c.LLM.MaxTokens,
+				ToolResolver:       toolRes,
+			}))
+
+			caps := prov.Capabilities()
+			logger.Info(ctx, "llm_service ready",
+				"provider", prov.Name(),
+				"default_model", c.LLM.DefaultModel,
+				"embed_model", c.LLM.DefaultEmbedModel,
+				"embed_dim", c.LLM.DefaultEmbedDim,
+				"rerank_model", c.RAG.RerankModel,
+				"tool_resolver", toolRes != nil,
+				"capabilities", map[string]bool{
+					"tool_call":  caps.ToolCall,
+					"reasoning":  caps.Reasoning,
+					"streaming":  caps.Streaming,
+					"embeddings": caps.Embeddings,
+				})
+
+			// cleanup：退出时释放 Provider 的 HTTP 连接 + ToolResolver PG 池
+			return func(ctx context.Context) error {
+				if provCleanup != nil {
+					_ = provCleanup(ctx)
+				} else {
+					_ = prov.Close()
 				}
-
-				llmservice.RegisterService(svr, service.New(service.Options{
-					Provider:           prov,
-					Mock:               app.FaultInjector(),
-					CacheEnabled:       c.LLM.CacheEnabled,
-					CacheTTL:           c.LLM.EmbedCacheTTL,
-					DefaultModel:       c.LLM.DefaultModel,
-					DefaultEmbedModel:  c.LLM.DefaultEmbedModel,
-					DefaultEmbedDim:    c.LLM.DefaultEmbedDim,
-					DefaultRerankModel: c.RAG.RerankModel,
-					MaxTokens:          c.LLM.MaxTokens,
-					ToolResolver:       toolRes,
-				}))
-
-				caps := prov.Capabilities()
-				logger.Info(ctx, "llm_service ready",
-					"provider", prov.Name(),
-					"default_model", c.LLM.DefaultModel,
-					"embed_model", c.LLM.DefaultEmbedModel,
-					"embed_dim", c.LLM.DefaultEmbedDim,
-					"rerank_model", c.RAG.RerankModel,
-					"tool_resolver", toolRes != nil,
-					"capabilities", map[string]bool{
-						"tool_call":  caps.ToolCall,
-						"reasoning":  caps.Reasoning,
-						"streaming":  caps.Streaming,
-						"embeddings": caps.Embeddings,
-					})
-
-				// cleanup：退出时释放 Provider 的 HTTP 连接 + ToolResolver PG 池
-				return func(ctx context.Context) error {
-					if provCleanup != nil {
-						_ = provCleanup(ctx)
-					} else {
-						_ = prov.Close()
-					}
-					if toolResClose != nil {
-						toolResClose()
-					}
-					return nil
-				}, nil
+				if toolResClose != nil {
+					toolResClose()
+				}
+				return nil
+			}, nil
 		},
 	}); err != nil {
 		logger.Error(ctx, "llm_service 启动失败", "err", err)

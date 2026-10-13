@@ -31,7 +31,7 @@ func (d *Deps) Login(c *app.RequestContext) {
 		// ★ DEBUG 日志留在 v1.0.1 观察期，后续改回简单版。
 		raw, _ := c.Body()
 		ctx, cancel := d.withTimeout(c)
-		logger.Error(ctx, "Login BindAndValidate failed [DEBUG]", "err", err, "raw_len", len(raw), "raw_prefix", string(raw[:min(len(raw),80)]))
+		logger.Error(ctx, "Login BindAndValidate failed [DEBUG]", "err", err, "raw_len", len(raw), "raw_prefix", string(raw[:min(len(raw), 80)]))
 		cancel()
 		Error(c, consts.StatusBadRequest, "INVALID_PARAM", "用户名或密码格式不正确")
 		return

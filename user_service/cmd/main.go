@@ -28,7 +28,7 @@ func main() {
 		DefaultHTTPPort: 8092,
 		Register: func(svr server.Server, app *serverx.App) (func(context.Context) error, error) {
 			var (
-				repo   repository.Repository
+				repo    repository.Repository
 				cleanup func(context.Context) error
 			)
 

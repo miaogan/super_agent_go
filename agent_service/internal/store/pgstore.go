@@ -27,9 +27,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aegis/agent_service/internal/toolexec"
 	agentv1 "github.com/aegis/idl/kitex_gen/agentv1"
 	commonv1 "github.com/aegis/idl/kitex_gen/commonv1"
-	"github.com/aegis/agent_service/internal/toolexec"
 	"github.com/aegis/pkg/conf"
 	"github.com/aegis/pkg/logger"
 	"github.com/jackc/pgerrcode"

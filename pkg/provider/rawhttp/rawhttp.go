@@ -75,10 +75,11 @@ func (p *Provider) Name() string { return "rawhttp" }
 // Capabilities ★ 如实声明能力子集。
 //
 // ★ ToolCall=true 自本次改动起生效：
-//   qwen3.8-max / deepseek-v4-pro-0813 / qwen3.8-27b 等主流模型均支持，
-//   我们补全了 chatResponse / streamFrame 的 tool_calls 解析以及
-//   请求体 tools 字段序列化，可以启用。
-//   Reasoning 仍保持 false（reasoning_content 解析需要独立工作）。
+//
+//	qwen3.8-max / deepseek-v4-pro-0813 / qwen3.8-27b 等主流模型均支持，
+//	我们补全了 chatResponse / streamFrame 的 tool_calls 解析以及
+//	请求体 tools 字段序列化，可以启用。
+//	Reasoning 仍保持 false（reasoning_content 解析需要独立工作）。
 //
 // 声明为false 不代表「模型不支持」，而是「本客户端没解析该字段」。
 // 上层据此决定是否切换到 einoProvider 或关闭相关特性。
@@ -432,7 +433,7 @@ func (p *Provider) embedNative(ctx context.Context, req *provider.EmbedRequest, 
 		"model": modelNameOf(m),
 		"input": map[string]any{"texts": req.Texts},
 		"parameters": map[string]any{
-			"text_type":   req.InputType, // query / document
+			"text_type":   req.InputType,  // query / document
 			"output_type": "dense&sparse", // DashScope 原生接口取值: dense / sparse / dense&sparse
 		},
 	}
