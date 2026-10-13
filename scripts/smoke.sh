@@ -23,6 +23,24 @@ VERBOSE=0
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+# 解释器探测：Windows 上 `python3` 常是微软商店的别名占位程序 ——
+# 它存在、可执行、但什么都不输出，于是 jsonq 一律返回空串，
+# 冒烟会在"登录成功却取不到 access_token"这种误导性断言上全线失败。
+# 判据必须是"真的能跑并输出版本"，不能用 command -v 是否存在来判。
+PY=""
+for _cand in python3 python py; do
+  if command -v "$_cand" >/dev/null 2>&1 && "$_cand" -c 'import json' >/dev/null 2>&1; then
+    PY="$_cand"
+    break
+  fi
+done
+if [ -z "$PY" ]; then
+  printf '[!] 未找到可用的 Python（jsonq 依赖 json 模块）。\n'
+  printf '    已尝试：python3 / python / py。\n'
+  printf '    Windows 注意：商店别名占位的 python3 可执行但无输出，需安装真实解释器。\n'
+  exit 1
+fi
+
 PASS=0
 FAIL=0
 declare -a FAILURES=()
@@ -56,7 +74,13 @@ req() {
   local args=(-sS -o "$TMP/body" -w '%{http_code}' -X "$method" --max-time 20)
   [ -n "$token" ] && args+=(-H "Authorization: Bearer $token")
   if [ -n "$data" ]; then
-    args+=(-H "Content-Type: $ctype" --data-binary "$data")
+    # 请求体必须走文件，不能用 --data-binary "$data"：
+    # Windows 上的 curl.exe 是原生程序，argv 要经本机 ANSI 代码页转换，
+    # 含中文的 JSON 会在**发出之前**就被破坏（服务端只是原样存回坏字节），
+    # 表现为"名称回显是乱码""检索零候选"这类根本不在服务端的失败。
+    # 走 @file 由 curl 直接读字节，同时顺带免疫引号转义问题。
+    printf '%s' "$data" > "$TMP/req"
+    args+=(-H "Content-Type: $ctype" --data-binary "@$TMP/req")
   fi
   HTTP_CODE="$(curl "${args[@]}" "$BASE_URL$path" 2>"$TMP/err")" || HTTP_CODE="000"
   BODY="$(cat "$TMP/body" 2>/dev/null)"
@@ -85,7 +109,7 @@ upload() {
 # 带点的路径（a.b）会在 data. 前缀下再试一次，
 # 否则 message.usage 这种写法会因为外层包了 data 而取不到。
 jsonq() {
-  printf '%s' "$1" | python3 -c '
+  printf '%s' "$1" | "$PY" -c '
 import json,sys
 try:
     d = json.load(sys.stdin)
