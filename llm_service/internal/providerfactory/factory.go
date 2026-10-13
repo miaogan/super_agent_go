@@ -14,18 +14,23 @@ import (
 	"github.com/aegis/pkg/conf"
 	"github.com/aegis/pkg/logger"
 	"github.com/aegis/pkg/provider"
-	"github.com/aegis/pkg/provider/chain"
 	"github.com/aegis/pkg/provider/mockprovider"
 	"github.com/aegis/pkg/provider/rawhttp"
 )
 
 // Build 按配置构建 Provider。
 //
-// 规则：
+// 规则（与代码一一对应，此前写着"eino + 多模型 → 走降级链"，
+// 而那条路径根本不存在，会误导按它做设计的人）：
 //  1. mock 模式 → mockProvider（不连外部模型，保证冒烟可离线跑）
-//  2. provider=eino 且模型数 > 1 → einoProvider，走降级链
-//  3. provider=eino 且单模型       → einoProvider 单体
-//  4. provider=rawhttp            → rawHTTPProvider 薄客户端
+//  2. llm.provider=mock → mockProvider（显式指定）
+//  3. provider=rawhttp 及各 OpenAI 兼容厂商名 → rawHTTPProvider 单体
+//  4. provider=eino 或留空 → 返回 error（einoprovider 未实现，见下）
+//
+// ★ 模型级降级（llm.models[].priority）不在本文件：rawhttp 实例持有
+//
+//	全部模型清单，换模型重试必须在 pkg/provider/rawhttp 内部做。
+//	该能力目前尚未实现，配置里的 priority 只被读进能力清单，不参与路由。
 //
 // 返回的 cleanup 用于释放连接；调用方应在退出时调用。
 func Build(ctx context.Context, c *conf.Config, mockMode bool) (provider.Provider, func(context.Context) error, error) {
@@ -86,15 +91,14 @@ func Build(ctx context.Context, c *conf.Config, mockMode bool) (provider.Provide
 	}
 }
 
-// chainOf 用降级链包装多个 Provider。
+// chainOf 已删除。
 //
-// 单个 Provider 时直接返回，避免无谓的间接层。
-func chainOf(providers ...provider.Provider) provider.Provider {
-	if len(providers) == 0 {
-		return nil
-	}
-	if len(providers) == 1 {
-		return providers[0]
-	}
-	return chain.New(chain.Options{Providers: providers})
-}
+// 它原本用 chain 包把多个 Provider 串成降级链，但**没有任何调用方**，
+// 而且机制与需求错配：pkg/provider/chain 解决的是"跨实现降级"
+// （rawhttp ↔ eino ↔ mock），而配置里 llm.models[].priority 想要的是
+// "跨模型降级"。一个 rawhttp Provider 实例本身就持有全部模型清单
+// （Options{Conf: c.LLM}），所以 chainOf(rawhttp, rawhttp) 只会得到
+// 同实现的两个副本，接上去也不会发生任何降级。
+//
+// 跨模型降级应在 rawhttp 内部按 priority 重试实现，不能靠这里包装。
+// chain 包本身保留：它是上述跨实现降级的正确载体。
