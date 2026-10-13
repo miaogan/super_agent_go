@@ -123,6 +123,15 @@ type ErrConflict struct{ Msg string }
 
 func (e *ErrConflict) Error() string { return e.Msg }
 
+// ErrDuplicate 唯一约束冲突（如同名 Agent / 同名工具已存在）。
+//
+// 与 ErrConflict 分开是因为二者对调用方的意义不同：重复是"换个名字再来"，
+// 而状态冲突是"当前状态不允许该操作"。合并成一个码会让前端只能显示后者，
+// 用户看不出自己只是重了名。两者 HTTP 状态码同为 409，不影响网关映射。
+type ErrDuplicate struct{ Msg string }
+
+func (e *ErrDuplicate) Error() string { return e.Msg }
+
 // ErrForbidden 无权操作
 type ErrForbidden struct{ Msg string }
 
@@ -252,7 +261,7 @@ func (s *Store) CreateAgent(ctx context.Context, agent *agentv1.Agent) (int64, e
 	tenant := agent.Tenant
 	for _, a := range s.agents {
 		if a.Tenant == tenant && a.Name == name {
-			return 0, &ErrConflict{Msg: "同名 Agent 已存在: " + name}
+			return 0, &ErrDuplicate{Msg: "同名 Agent 已存在: " + name}
 		}
 	}
 
@@ -316,7 +325,7 @@ func (s *Store) UpdateAgent(ctx context.Context, agent *agentv1.Agent, mask []st
 		newName := strings.TrimSpace(agent.Name)
 		for id, a := range s.agents {
 			if id != old.AgentId && a.Tenant == old.Tenant && a.Name == newName {
-				return nil, &ErrConflict{Msg: "同名 Agent 已存在: " + newName}
+				return nil, &ErrDuplicate{Msg: "同名 Agent 已存在: " + newName}
 			}
 		}
 		cp.Name = newName
@@ -753,7 +762,7 @@ func (s *Store) CreateTool(ctx context.Context, tool *agentv1.Tool) (int64, erro
 	defer s.mu.Unlock()
 	for _, t := range s.tools {
 		if t.Name == tool.Name {
-			return 0, &ErrConflict{Msg: "同名工具已存在: " + tool.Name}
+			return 0, &ErrDuplicate{Msg: "同名工具已存在: " + tool.Name}
 		}
 	}
 	now := time.Now().UnixMilli()
@@ -817,7 +826,7 @@ func (s *Store) UpdateTool(ctx context.Context, tool *agentv1.Tool, mask []strin
 		newName := strings.TrimSpace(tool.Name)
 		for id, t := range s.tools {
 			if id != old.ToolId && t.Name == newName {
-				return nil, &ErrConflict{Msg: "同名工具已存在: " + newName}
+				return nil, &ErrDuplicate{Msg: "同名工具已存在: " + newName}
 			}
 		}
 		cp.Name = newName

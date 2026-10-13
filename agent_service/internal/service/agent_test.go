@@ -241,7 +241,13 @@ func TestMapErr(t *testing.T) {
 		t.Error("NotFound 应映射 ErrNotFound")
 	}
 	if errno.CodeOf(mapErr(&store.ErrConflict{})) != errno.ErrConflict {
+
 		t.Error("Conflict 应映射 ErrConflict")
+	}
+	// 重名要映射到 ErrAlreadyExists（"资源已存在"），落到 ErrConflict 会显示
+	// "当前状态不允许该操作"，用户看不出自己只是名字重了。
+	if errno.CodeOf(mapErr(&store.ErrDuplicate{Msg: "同名 Agent 已存在: x"})) != errno.ErrAlreadyExists {
+		t.Error("Duplicate 应映射 ErrAlreadyExists")
 	}
 	if errno.CodeOf(mapErr(&store.ErrForbidden{})) != errno.ErrForbidden {
 		t.Error("Forbidden 应映射 ErrForbidden")

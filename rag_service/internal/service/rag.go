@@ -26,6 +26,23 @@ import (
 	"github.com/aegis/rag_service/internal/retrieve"
 )
 
+// EmbedDefaults 建库时的默认 Embedding 模型与维度。
+//
+// ★ 为什么必须由调用方注入而不是在这里写死：
+//
+//	原先 cfgEmbedDim() 恒返回 1024、默认模型硬编码 "text-embedding-v4"，
+//	完全不看配置。一旦换用 1536 维模型（如 text-embedding-v2 / ada-002），
+//	集合仍按 1024 建立，向量化返回 1536 → 写入阶段维度不匹配。
+//	而 configs 的自洽检查只比对 llm.default_embed_dim 与 milvus.dim，
+//	看不到这里，于是错误被推迟到运行时才暴露。
+//	真相在 llm 段与 milvus 段，这里只是消费者，所以由 cmd 装配时传入。
+type EmbedDefaults struct {
+	// Model 请求未指定 embed_model 时使用它（空则回退保守默认）。
+	Model string
+	// Dim 集合维度；<=0 时回退 1024（保持与历史配置一致）。
+	Dim int
+}
+
 // RagService 实现 ragv1.RagService
 type RagService struct {
 	meta      meta.Store
@@ -35,12 +52,13 @@ type RagService struct {
 	mock      *mockx.FaultInjector
 	cfg       conf.RAGConf
 	minio     minio.Store
+	embed     EmbedDefaults
 	startedAt time.Time
 }
 
 // New 构造 handler（meta 传 PG 或内存实现，见 cmd/main.go 装配）
 func New(m meta.Store, v vectordb.Store, p *ingest.Pipeline, e *retrieve.Engine,
-	mock *mockx.FaultInjector, cfg conf.RAGConf, mstore minio.Store) *RagService {
+	mock *mockx.FaultInjector, cfg conf.RAGConf, mstore minio.Store, embed EmbedDefaults) *RagService {
 	return &RagService{
 		meta:      m,
 		vector:    v,
@@ -49,6 +67,7 @@ func New(m meta.Store, v vectordb.Store, p *ingest.Pipeline, e *retrieve.Engine,
 		mock:      mock,
 		cfg:       cfg,
 		minio:     mstore,
+		embed:     embed,
 		startedAt: time.Now(),
 	}
 }
@@ -97,10 +116,9 @@ func (s *RagService) CreateKnowledgeBase(ctx context.Context, req *ragv1.CreateK
 	dim := int32(s.cfgEmbedDim())
 	embedModel := req.GetEmbedModel()
 	if embedModel == "" {
-		// ★ 必须与 llm_service 注册的 embedding 模型一致
-		//  （compose AEGIS_LLM__MODELS__1__NAME = text-embedding-v4，
-		//   走 DashScope 原生接口返回 dense 1024 维 + sparse SPLADE 向量）。
-		embedModel = "text-embedding-v4"
+		// 取配置的 llm.default_embed_model，而不是在此写死模型名：
+		// 写死后换模型只改 configs 是不起作用的，建库仍会落在旧模型上。
+		embedModel = s.defaultEmbedModel()
 	}
 	if got := s.dimOf(embedModel); got != 0 && got != int(dim) {
 		return nil, errno.New(errno.ErrEmbeddingDimMismatch)
@@ -739,7 +757,21 @@ func (s *RagService) collectionOf(kbID int64) string {
 	return "aegis_kb_" + itoa(kbID)
 }
 
-func (s *RagService) cfgEmbedDim() int { return 1024 }
+func (s *RagService) cfgEmbedDim() int {
+	if s.embed.Dim > 0 {
+		return s.embed.Dim
+	}
+	// 未注入时保持历史默认，避免装配遗漏直接把建库打挂
+	return 1024
+}
+
+// defaultEmbedModel 请求未指定 embed_model 时使用它。
+func (s *RagService) defaultEmbedModel() string {
+	if m := strings.TrimSpace(s.embed.Model); m != "" {
+		return m
+	}
+	return "text-embedding-v4"
+}
 
 // dimOf 返回模型对应维度，未知模型返回 0（表示不校验）
 func (s *RagService) dimOf(model string) int {

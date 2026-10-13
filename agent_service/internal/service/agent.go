@@ -52,6 +52,10 @@ func mapErr(err error) error {
 		return errno.Wrap(errno.ErrNotFound, err)
 	case *store.ErrConflict:
 		return errno.Wrap(errno.ErrConflict, err)
+	case *store.ErrDuplicate:
+		// 重名要单独映射：落到 ErrConflict 会显示"当前状态不允许该操作"，
+		// 用户看不出自己只是名字重了。
+		return errno.Wrap(errno.ErrAlreadyExists, err)
 	case *store.ErrForbidden:
 		return errno.Wrap(errno.ErrForbidden, err)
 	default:

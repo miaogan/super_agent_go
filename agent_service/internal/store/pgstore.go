@@ -208,7 +208,7 @@ func (r *PgStore) CreateAgent(ctx context.Context, agent *agentv1.Agent) (int64,
 	).Scan(&id, &created, &updated)
 	if err != nil {
 		if isUniqueViolation(err) {
-			return 0, &ErrConflict{Msg: "同名 Agent 已存在: " + name}
+			return 0, &ErrDuplicate{Msg: "同名 Agent 已存在: " + name}
 		}
 		return 0, fmt.Errorf("插入 agent 失败: %w", err)
 	}
@@ -328,7 +328,7 @@ func (r *PgStore) UpdateAgent(ctx context.Context, agent *agentv1.Agent, mask []
 	}
 	if err != nil {
 		if isUniqueViolation(err) {
-			return nil, &ErrConflict{Msg: "同名 Agent 已存在: " + strings.TrimSpace(agent.Name)}
+			return nil, &ErrDuplicate{Msg: "同名 Agent 已存在: " + strings.TrimSpace(agent.Name)}
 		}
 		return nil, fmt.Errorf("更新 agent 失败: %w", err)
 	}
@@ -888,7 +888,7 @@ func (r *PgStore) CreateTool(ctx context.Context, tool *agentv1.Tool) (int64, er
 	).Scan(&id)
 	if err != nil {
 		if isUniqueViolation(err) {
-			return 0, &ErrConflict{Msg: "同名工具已存在: " + tool.Name}
+			return 0, &ErrDuplicate{Msg: "同名工具已存在: " + tool.Name}
 		}
 		return 0, fmt.Errorf("插入工具失败: %w", err)
 	}
@@ -983,7 +983,7 @@ func (r *PgStore) UpdateTool(ctx context.Context, tool *agentv1.Tool, mask []str
 	}
 	if err != nil {
 		if isUniqueViolation(err) {
-			return nil, &ErrConflict{Msg: "同名工具已存在: " + strings.TrimSpace(tool.Name)}
+			return nil, &ErrDuplicate{Msg: "同名工具已存在: " + strings.TrimSpace(tool.Name)}
 		}
 		return nil, fmt.Errorf("更新工具失败: %w", err)
 	}

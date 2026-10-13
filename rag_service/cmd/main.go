@@ -216,7 +216,12 @@ func main() {
 			bgCtx, cancelBg := context.WithCancel(ctx)
 			pipeline.StartCompensator(bgCtx, c.RAG.CompensateInterval)
 
-			ragservice.RegisterService(svr, service.New(metaStore, vectorStore, pipeline, engine, app.FaultInjector(), c.RAG, minioStore))
+			ragservice.RegisterService(svr, service.New(metaStore, vectorStore, pipeline, engine,
+				app.FaultInjector(), c.RAG, minioStore,
+				service.EmbedDefaults{
+					Model: c.LLM.DefaultEmbedModel,
+					Dim:   c.LLM.DefaultEmbedDim,
+				}))
 
 			kwEnabled, webEnabled := c.RAG.SourcesEnabled()
 			logger.Info(ctx, "rag_service ready",

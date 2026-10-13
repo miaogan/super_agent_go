@@ -52,7 +52,7 @@ func newTestService(t *testing.T) (*RagService, *meta.MemoryStore) {
 		t.Fatalf("建文档失败: %v", err)
 	}
 	s := New(m, mockstore.New(), nil, nil,
-		mockx.NewFaultInjector(false, 0, nil), conf.RAGConf{}, nil)
+		mockx.NewFaultInjector(false, 0, nil), conf.RAGConf{}, nil, EmbedDefaults{})
 	return s, m
 }
 
@@ -327,7 +327,7 @@ func TestDocumentOps_DenyMissingKBParent(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("建文档失败: %v", err)
 	}
-	s := New(m, mockstore.New(), nil, nil, mockx.NewFaultInjector(false, 0, nil), conf.RAGConf{}, nil)
+	s := New(m, mockstore.New(), nil, nil, mockx.NewFaultInjector(false, 0, nil), conf.RAGConf{}, nil, EmbedDefaults{})
 
 	if _, err := s.GetDocument(context.Background(),
 		&ragv1.GetDocumentReq{DocId: 555, Identity: user(1, "t")}); err == nil {
@@ -350,5 +350,56 @@ func TestAgentKBList_StillGuardedByKBRules(t *testing.T) {
 	// 而文档级必须拒绝同一个 identity
 	if err := s.checkDocPermission(user(0, ""), kb, false); err == nil {
 		t.Fatal("文档级接口不应沿用 uid==0 放行")
+	}
+}
+
+// TestEmbedDefaults_ComeFromConfig 建库的维度与默认模型必须来自注入的配置。
+//
+// 这条是回归防线：历史上 cfgEmbedDim() 恒返回 1024、默认模型名硬编码，
+// 换用 1536 维模型时集合仍按 1024 建立，直到向量化写入阶段才炸维度不匹配，
+// 而 configs 的自洽检查看不到这里。
+func TestEmbedDefaults_ComeFromConfig(t *testing.T) {
+	s, _ := newTestService(t)
+
+	s.embed = EmbedDefaults{Model: "text-embedding-v2", Dim: 1536}
+	if got := s.cfgEmbedDim(); got != 1536 {
+		t.Errorf("维度应取配置值 1536, 实际 %d", got)
+	}
+	if got := s.defaultEmbedModel(); got != "text-embedding-v2" {
+		t.Errorf("默认模型应取配置值, 实际 %q", got)
+	}
+
+	// 未注入时回退历史默认，不能让建库直接失败
+	s.embed = EmbedDefaults{}
+	if got := s.cfgEmbedDim(); got != 1024 {
+		t.Errorf("零值应回退 1024, 实际 %d", got)
+	}
+	if got := s.defaultEmbedModel(); got != "text-embedding-v4" {
+		t.Errorf("零值应回退 text-embedding-v4, 实际 %q", got)
+	}
+
+	// dimOf 要认得配置里的模型，否则"维度与模型一致"的校验会被静默跳过
+	if got := s.dimOf(s.defaultEmbedModel()); got == 0 && s.embed.Dim > 0 {
+		t.Logf("提示：模型 %q 不在 dimOf 表中，维度一致性校验不会生效", s.defaultEmbedModel())
+	}
+}
+
+// TestCreateKB_DimMatchesDeclaredModel 配置 1536 维模型时，建库不应仍用 1024。
+func TestCreateKB_DimMatchesDeclaredModel(t *testing.T) {
+	s, _ := newTestService(t)
+	s.embed = EmbedDefaults{Model: "text-embedding-v2", Dim: 1536}
+
+	_, err := s.CreateKnowledgeBase(context.Background(), &ragv1.CreateKnowledgeBaseReq{
+		Identity: user(ownerUID, tenant),
+		Name:     "dim-check",
+	})
+	if err != nil {
+		t.Fatalf("用配置的模型/维度建库应成功: %v", err)
+	}
+	kbs, _ := s.meta.ListKB(context.Background(), "", tenant, ownerUID, 1, 20)
+	for _, kb := range kbs {
+		if kb.GetName() == "dim-check" && kb.GetEmbeddingDim() != 1536 {
+			t.Errorf("集合维度应为 1536，实际 %d", kb.GetEmbeddingDim())
+		}
 	}
 }
