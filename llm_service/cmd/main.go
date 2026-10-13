@@ -15,6 +15,7 @@ import (
 	"github.com/aegis/llm_service/internal/providerfactory"
 	"github.com/aegis/llm_service/internal/service"
 	"github.com/aegis/llm_service/internal/toolresolver"
+	"github.com/aegis/llm_service/internal/usagestore"
 	"github.com/aegis/pkg/logger"
 	"github.com/aegis/pkg/serverx"
 )
@@ -54,6 +55,25 @@ func main() {
 				}
 			}
 
+			// 用量落库：让 token_usage 表成为用量的真相源。
+			// 不注入时 UsageRecorder 只有进程内环形缓冲 —— 重启即丢历史，
+			// 且多副本各自一份，用量统计口径不成立。
+			// 与 ToolResolver 同一套降级姿势：存不下用量不该让服务起不来。
+			var (
+				usageSink   usagestore.Sink
+				usageFinish func(context.Context) error
+			)
+			if !app.MockMode() {
+				if us, err := usagestore.NewPG(ctx, c.Postgres); err == nil {
+					usageSink = us
+					usageFinish = us.Close
+					logger.Info(ctx, "llm_service: 用量落库已注入（PG 异步批量）")
+				} else {
+					logger.Warn(ctx, "llm_service: 用量只留内存（重启即丢、多副本不聚合）",
+						"err", err)
+				}
+			}
+
 			llmservice.RegisterService(svr, service.New(service.Options{
 				Provider:           prov,
 				Mock:               app.FaultInjector(),
@@ -65,6 +85,7 @@ func main() {
 				DefaultRerankModel: c.RAG.RerankModel,
 				MaxTokens:          c.LLM.MaxTokens,
 				ToolResolver:       toolRes,
+				UsageSink:          usageSink,
 			}))
 
 			caps := prov.Capabilities()
@@ -91,6 +112,12 @@ func main() {
 				}
 				if toolResClose != nil {
 					toolResClose()
+				}
+				// 用量出口自带连接池，与其他清理项无先后依赖；
+				// Close 内部会停止接收、把缓冲区里剩下的批次排空再关池。
+				// 给它 ctx 是为了在优雅退出期限内别卡太久。
+				if usageFinish != nil {
+					_ = usageFinish(ctx)
 				}
 				return nil
 			}, nil

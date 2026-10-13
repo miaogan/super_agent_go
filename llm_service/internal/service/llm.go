@@ -21,6 +21,7 @@ import (
 	commonv1 "github.com/aegis/idl/kitex_gen/commonv1"
 	llmv1 "github.com/aegis/idl/kitex_gen/llmv1"
 
+	"github.com/aegis/llm_service/internal/usagestore"
 	"github.com/aegis/pkg/cache"
 	"github.com/aegis/pkg/errno"
 	"github.com/aegis/pkg/logger"
@@ -79,6 +80,9 @@ type Options struct {
 
 	// ToolResolver 可选工具解析器。nil 时忽略 req.Tools。
 	ToolResolver ToolResolver
+
+	// UsageSink 可选用量落库出口。nil 时用量只留在进程内环形缓冲。
+	UsageSink usagestore.Sink
 }
 
 // New 构造 handler
@@ -91,7 +95,7 @@ func New(opt Options) *LLMService {
 		prov:               opt.Provider,
 		mock:               opt.Mock,
 		embedCache:         embedCache,
-		usage:              NewUsageRecorder(1000),
+		usage:              NewUsageRecorder(1000, opt.UsageSink),
 		defaultModel:       opt.DefaultModel,
 		defaultEmbedModel:  opt.DefaultEmbedModel,
 		defaultRerankModel: opt.DefaultRerankModel,
@@ -675,6 +679,9 @@ type UsageRecorder struct {
 	mu      sync.RWMutex
 	records []*UsageRecord
 	max     int
+
+	// sink 异步落库出口；nil 表示只留内存（无 PG 或 mock 环境）。
+	sink usagestore.Sink
 }
 
 // UsageRecord 一条计量记录
@@ -690,12 +697,12 @@ type UsageRecord struct {
 	LatencyMS        int64
 }
 
-// NewUsageRecorder 构造计量记录器
-func NewUsageRecorder(max int) *UsageRecorder {
+// NewUsageRecorder 构造计量记录器。sink 可为 nil（只留内存）。
+func NewUsageRecorder(max int, sink usagestore.Sink) *UsageRecorder {
 	if max <= 0 {
 		max = 1000
 	}
-	return &UsageRecorder{max: max}
+	return &UsageRecorder{max: max, sink: sink}
 }
 
 // Record 记录一次调用
@@ -705,6 +712,23 @@ func (r *UsageRecorder) Record(rec *UsageRecord) {
 	}
 	if rec.CreatedAt == 0 {
 		rec.CreatedAt = time.Now().Unix()
+	}
+
+	// 先投递落库、再入环形缓冲。sink.Save 是非阻塞的（满了自己丢并计数），
+	// 放前面既不会拖慢请求，也不会因为内存环淘汰而漏掉落库。
+	if r.sink != nil {
+		r.sink.Save(&usagestore.Record{
+			UID:              rec.UID,
+			Model:            rec.Model,
+			PromptTokens:     rec.PromptTokens,
+			CompletionTokens: rec.CompletionTokens,
+			TotalTokens:      rec.PromptTokens + rec.CompletionTokens,
+			Cost:             rec.Cost,
+			IsFallback:       rec.Degraded,
+			LatencyMS:        rec.LatencyMS,
+			CreatedAt:        rec.CreatedAt,
+			RequestID:        rec.RequestID,
+		})
 	}
 
 	r.mu.Lock()
