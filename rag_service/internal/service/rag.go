@@ -391,6 +391,10 @@ func (s *RagService) GetDocument(ctx context.Context, req *ragv1.GetDocumentReq)
 	if err := s.mock.Sleep(ctx); err != nil {
 		return nil, err
 	}
+	// 文档属主/租户校验：不能只凭 doc_id 取
+	if _, _, err := s.docAccess(ctx, req.GetIdentity(), req.GetDocId(), false); err != nil {
+		return nil, err
+	}
 	rec, err := s.meta.GetDoc(ctx, req.GetDocId())
 	if err != nil {
 		return nil, errno.Wrap(errno.ErrDocNotFound, err)
@@ -400,6 +404,10 @@ func (s *RagService) GetDocument(ctx context.Context, req *ragv1.GetDocumentReq)
 
 func (s *RagService) ListDocuments(ctx context.Context, req *ragv1.ListDocumentsReq) (*ragv1.ListDocumentsResp, error) {
 	if err := s.mock.Sleep(ctx); err != nil {
+		return nil, err
+	}
+	// 按 kbID 校验：否则可通过列举任意 KB 的文档清单探测他人数据
+	if _, err := s.kbAccess(ctx, req.GetIdentity(), req.GetKbId()); err != nil {
 		return nil, err
 	}
 	page, size := pagination.Normalize(req.GetPage())
@@ -414,9 +422,10 @@ func (s *RagService) DeleteDocument(ctx context.Context, req *ragv1.DeleteDocume
 	if err := s.mock.Sleep(ctx); err != nil {
 		return nil, err
 	}
-	rec, err := s.meta.GetDoc(ctx, req.GetDocId())
+	// 删除是破坏性操作：要求 owner 或 admin（同租户不够）
+	rec, _, err := s.docAccess(ctx, req.GetIdentity(), req.GetDocId(), true)
 	if err != nil {
-		return nil, errno.Wrap(errno.ErrDocNotFound, err)
+		return nil, err
 	}
 	if err := s.vector.DeleteByDoc(ctx, s.collectionOf(rec.Doc.GetKbId()), rec.Doc.GetDocId()); err != nil {
 		logger.Warn(ctx, "删除文档向量失败", "doc_id", req.GetDocId(), "err", err)
@@ -439,13 +448,11 @@ func (s *RagService) RetryDocument(ctx context.Context, req *ragv1.RetryDocument
 	if err := s.mock.Sleep(ctx); err != nil {
 		return nil, err
 	}
-	rec, err := s.meta.GetDoc(ctx, req.GetDocId())
+	// 重试会重写切片与向量，属破坏性操作：要求 owner 或 admin。
+	// 原实现拿到 identity 却只用于传给 Ingest，没做任何授权。
+	rec, kb, err := s.docAccess(ctx, req.GetIdentity(), req.GetDocId(), true)
 	if err != nil {
-		return nil, errno.Wrap(errno.ErrDocNotFound, err)
-	}
-	kb, err := s.meta.GetKB(ctx, rec.Doc.GetKbId())
-	if err != nil {
-		return nil, errno.Wrap(errno.ErrKBNotFound, err)
+		return nil, err
 	}
 
 	// re_embed=true 时只重试向量化，保留已有正文与切片
@@ -468,8 +475,9 @@ func (s *RagService) ListChunks(ctx context.Context, req *ragv1.ListChunksReq) (
 	if err := s.mock.Sleep(ctx); err != nil {
 		return nil, err
 	}
-	if _, err := s.meta.GetDoc(ctx, req.GetDocId()); err != nil {
-		return nil, errno.Wrap(errno.ErrDocNotFound, err)
+	// 切片正文等于文档内容，读权限与 GetDocument 一致
+	if _, _, err := s.docAccess(ctx, req.GetIdentity(), req.GetDocId(), false); err != nil {
+		return nil, err
 	}
 	page, size := pagination.Normalize(req.GetPage())
 	chunks, total := s.meta.ListChunks(ctx, req.GetDocId(), page, size)
@@ -599,10 +607,8 @@ func (s *RagService) checkKBPermission(id *commonv1.Identity, kb *ragv1.Knowledg
 	if id.GetUid() == 0 {
 		return nil // 内部调用未带身份，放行
 	}
-	for _, role := range id.GetScopes() {
-		if role == "admin" || role == "*" {
-			return nil
-		}
+	if hasAdminScope(id) {
+		return nil
 	}
 	if kb.GetOwnerUid() == id.GetUid() {
 		return nil
@@ -612,6 +618,82 @@ func (s *RagService) checkKBPermission(id *commonv1.Identity, kb *ragv1.Knowledg
 		return nil
 	}
 	return errno.New(errno.ErrKBAccessDenied)
+}
+
+// hasAdminScope 判断是否带 admin 或通配 scope。
+func hasAdminScope(id *commonv1.Identity) bool {
+	for _, role := range id.GetScopes() {
+		if role == "admin" || role == "*" {
+			return true
+		}
+	}
+	return false
+}
+
+// docAccess 解析文档归属并校验权限，返回文档记录与其所属知识库。
+//
+// ★ 为什么需要它：文档级接口（Get/List/Delete/Retry/Chunks）过去只按
+//
+//	doc_id 直查元数据，既不查归属也不校验权限，而网关对 /api/v1 只做
+//	「是否登录」不做「是否属于你」——于是任何登录用户枚举自增 doc_id
+//	就能读、甚至删除他人文档（连带向量与 MinIO 对象）。
+//	KB 级接口一直有 checkKBPermission，这里补齐缺失的那一半。
+//
+// write=true 用于破坏性操作（删除/重试）：要求 owner 或 admin。
+// 同租户可以共享**阅读**知识库，但不该因为同租户就能删别人上传的文档。
+//
+// 与 checkKBPermission 不同，这里不接受 uid==0 的匿名放行：
+// 这些方法只有网关（已过 Auth）会调用，没有内部免身份路径。
+// 真出现免身份调用说明上游鉴权被绕过，应当拒绝而不是放行。
+func (s *RagService) docAccess(ctx context.Context, id *commonv1.Identity, docID int64, write bool) (*meta.DocumentRecord, *ragv1.KnowledgeBase, error) {
+	rec, err := s.meta.GetDoc(ctx, docID)
+	if err != nil {
+		return nil, nil, errno.Wrap(errno.ErrDocNotFound, err)
+	}
+	kb, err := s.meta.GetKB(ctx, rec.Doc.GetKbId())
+	if err != nil {
+		return nil, nil, errno.Wrap(errno.ErrKBNotFound, err)
+	}
+	if err := s.checkDocPermission(id, kb, write); err != nil {
+		return nil, nil, err
+	}
+	return rec, kb, nil
+}
+
+// checkDocPermission 见 docAccess。
+func (s *RagService) checkDocPermission(id *commonv1.Identity, kb *ragv1.KnowledgeBase, write bool) error {
+	if id.GetUid() == 0 {
+		return errno.New(errno.ErrKBAccessDenied)
+	}
+	if hasAdminScope(id) {
+		return nil
+	}
+	if kb.GetOwnerUid() == id.GetUid() {
+		return nil
+	}
+	if write {
+		return errno.New(errno.ErrKBAccessDenied)
+	}
+	// 读操作沿用知识库的租户级共享语义
+	if kb.GetTenant() != "" && kb.GetTenant() == id.GetTenant() {
+		return nil
+	}
+	return errno.New(errno.ErrKBAccessDenied)
+}
+
+// kbAccess 按 kbID 校验知识库权限并返回该知识库（读语义）。
+//
+// ListDocuments 只有 kbID 没有 docID，用它走同一条权限判定，
+// 避免"列文档"成为 GetKB 之外的另一条越权读取路径。
+func (s *RagService) kbAccess(ctx context.Context, id *commonv1.Identity, kbID int64) (*ragv1.KnowledgeBase, error) {
+	kb, err := s.meta.GetKB(ctx, kbID)
+	if err != nil {
+		return nil, errno.Wrap(errno.ErrKBNotFound, err)
+	}
+	if err := s.checkKBPermission(id, kb); err != nil {
+		return nil, err
+	}
+	return kb, nil
 }
 
 func (s *RagService) collectionOf(kbID int64) string {

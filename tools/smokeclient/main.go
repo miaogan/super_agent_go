@@ -383,7 +383,7 @@ func runRAG(ctx context.Context) error {
 	}
 
 	// 切片列表：验证 vec_status 已全部就绪
-	chunks, err := c.ListChunks(ctx, &ragv1.ListChunksReq{DocId: doc.DocId, Page: &commonv1.PageReq{Page: 1, PageSize: 50}})
+	chunks, err := c.ListChunks(ctx, &ragv1.ListChunksReq{DocId: doc.DocId, Page: &commonv1.PageReq{Page: 1, PageSize: 50}, Identity: identity})
 	if err != nil {
 		return err
 	}
