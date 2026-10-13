@@ -157,6 +157,12 @@ milvus-diag: ## ★诊断 Milvus 一致性行为（写后多久可检索 / Sync 
 	if [ -f $(ROOT)/.env ]; then set -a; . $(ROOT)/.env; set +a; fi; \
 	go run scripts/milvus_diag.go
 
+.PHONY: tenant-audit
+tenant-audit: ## 只读巡检：统计存量向量里 tenant 为空的行数（回填决策依据）
+	@source $(GO_ENV) && \
+	if [ -f $(ROOT)/.env ]; then set -a; . $(ROOT)/.env; set +a; fi; \
+	go run scripts/tenant_backfill_audit.go
+
 .PHONY: milvus-clean
 milvus-clean: ## 清理探测/诊断残留集合（白名单，只删 aegis_probe_* / aegis_diag_*）##
 	@source $(GO_ENV) && \
