@@ -623,5 +623,47 @@ INSERT INTO user_roles (uid, role_id) VALUES
   (1004, 2)
 ON CONFLICT DO NOTHING;
 
+-- ================================================================
+-- §3.16 令牌吊销与签发索引 — 让登出在重启与多副本下仍然成立
+-- ================================================================
+--
+-- 背景：这两张表面向的是 auth_service/internal/token 里两个进程内 map
+-- （revoked: jti→记录，issued: uid→jti→过期时间）。它们的后果是：
+--
+--   1) 进程重启后 issued 为空 → RevokeAllOf(uid) 找不到任何令牌 →
+--      用户点"退出登录"只吊销了 access token，refresh token 照样能换新票。
+--      这跟多副本无关，单副本重启就发生。
+--   2) 另一副本的 revoked 里没有该 jti → 已登出的 access token 继续被放行。
+--
+-- 都不做分区：行数被令牌生命周期天然约束（配合下面的 Prune 定期清理），
+-- 且查询都以"未过期"为前提，保持普通表最简单。
+
+-- 已吊销的令牌。主键用 jti：同一令牌重复登出必须是幂等的。
+CREATE TABLE token_revocation (
+  jti         VARCHAR(64)  PRIMARY KEY,
+  uid         BIGINT       NOT NULL,
+  -- 令牌自身过期时间：过期后即可安全清理，因为 JWT 校验那一层已经先拒了
+  expires_at  TIMESTAMPTZ  NOT NULL,
+  revoked_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+-- 查"这个 jti 是否被吊销"是鉴权热路径上的唯一新查询，必须走主键。
+-- 清理过期行用 expires_at 索引。
+CREATE INDEX idx_token_revocation_exp ON token_revocation (expires_at);
+
+-- 每个用户在用哪些令牌。RevokeAllOf 靠它按 uid 找到全部 jti，
+-- 不再依赖"本进程签发过"这个脆弱前提。
+CREATE TABLE issued_token (
+  uid         BIGINT       NOT NULL,
+  jti         VARCHAR(64)  NOT NULL,
+  expires_at  TIMESTAMPTZ  NOT NULL,
+  issued_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  PRIMARY KEY (uid, jti)
+);
+
+-- 按 uid 列全部在用令牌（登出走这条）
+CREATE INDEX idx_issued_token_uid_exp ON issued_token (uid, expires_at);
+CREATE INDEX idx_issued_token_exp     ON issued_token (expires_at);
+
 -- 完成
 -- SELECT 'init.sql done' AS status;
