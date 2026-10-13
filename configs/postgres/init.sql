@@ -4,6 +4,9 @@
 -- 来源：docs/04-数据库设计.md §3 / §6 / §7 / §8
 --
 -- ★ 分区表按月创建；当前脚本建 2026 Q4 子分区，后续按需追加。
+--   但**每张分区表都必须带 DEFAULT 分区**（messages / token_usage /
+--   audit_logs 均已加）：只按月建而不留兜底，等于给未来某个 00:00
+--   排了一次"所有写入报错"的故障，且落在对话主路径上时表现为静默丢历史。
 -- ★ updated_at 自动维护通过触发器实现（PG 无 ON UPDATE 语法）。
 -- ★ chunks.content_trgm 索引依赖 pg_trgm 扩展。
 -- =====================================================================
@@ -279,6 +282,14 @@ CREATE TABLE messages_2026_11 PARTITION OF messages
 CREATE TABLE messages_2026_12 PARTITION OF messages
   FOR VALUES FROM ('2026-12-01') TO ('2027-01-01');
 
+-- ★ DEFAULT 分区不是可选的收尾，而是防到日期就断的兜底。
+--   月度分区只预建到某月时，一旦写入超出最后分区的时间，PG 会直接报
+--   "no partition of relation found for row"。messages 在对话主写入路径上，
+--   表现是历史静默丢失（每轮取不到上下文，agent 看起来"失忆"），
+--   而不是显式故障 —— 所以必须有 DEFAULT 分区接住。
+--   后续按月建分区后，可用 DETACH/PARTITION 整理默认分区里的溢出数据。
+CREATE TABLE messages_default PARTITION OF messages DEFAULT;
+
 CREATE INDEX idx_messages_session_time ON messages (session_id, created_at DESC);
 CREATE INDEX idx_messages_uid_time     ON messages (uid, created_at DESC);
 
@@ -310,6 +321,9 @@ CREATE TABLE token_usage_2026_11 PARTITION OF token_usage
   FOR VALUES FROM ('2026-11-01') TO ('2026-12-01');
 CREATE TABLE token_usage_2026_12 PARTITION OF token_usage
   FOR VALUES FROM ('2026-12-01') TO ('2027-01-01');
+
+-- DEFAULT 分区兜底，理由同 messages（见该表处注释）。
+CREATE TABLE token_usage_default PARTITION OF token_usage DEFAULT;
 
 CREATE INDEX idx_token_usage_uid_time   ON token_usage (uid, created_at DESC);
 CREATE INDEX idx_token_usage_app_time   ON token_usage (app_id, created_at DESC);
@@ -400,6 +414,10 @@ CREATE TABLE audit_logs (
 
 CREATE TABLE audit_logs_2026_10 PARTITION OF audit_logs
   FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
+
+-- DEFAULT 分区兜底，理由同 messages（见该表处注释）。
+-- 本表原先只有 2026-10 一个分区，即 11 月起写入就会失败。
+CREATE TABLE audit_logs_default PARTITION OF audit_logs DEFAULT;
 
 CREATE INDEX idx_audit_uid_time    ON audit_logs (uid, created_at DESC);
 CREATE INDEX idx_audit_action_time ON audit_logs (action, created_at DESC);
